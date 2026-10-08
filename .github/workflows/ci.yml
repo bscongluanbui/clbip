@@ -145,7 +145,12 @@ jobs:
           PY
       - name: Verify the published digest can be pulled
         if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
           DIGEST=$(python3 -c 'import json; print(json.load(open("container-release.json"))["digest"])')
           docker pull "$DIGEST"
           docker run --rm --network none --entrypoint python "$DIGEST" -c 'import app, credentials, network_inventory; from validation import DEFAULT_SETTINGS; assert DEFAULT_SETTINGS["max_connections"] == 64; print("PUBLISHED_IMPORTS=OK MAXCONN=64")'
