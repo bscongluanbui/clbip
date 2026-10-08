@@ -103,7 +103,7 @@ class CredentialTests(unittest.TestCase):
 
     def test_empty_bootstrap_and_same_password_are_supported(self):
         self.path.unlink()
-        self.store.initialize('')
+        self.store.initialize('', group_id=os.getgid() if hasattr(os, 'getgid') else 10001)
         self.assertEqual(self.store.read(), '')
         snapshot = self.store.read_snapshot()
         self.assertEqual(self.store.change('', '', ''), {'changed': False, 'requires_login': False, 'unchanged': True})
@@ -229,7 +229,7 @@ class DashboardPasswordTests(unittest.TestCase):
     def test_missing_file_uses_bootstrap_only_until_worker_initializes(self):
         self.path.unlink()
         self.login()
-        self.store.initialize(OLD)
+        self.store.initialize(OLD, group_id=os.getgid() if hasattr(os, 'getgid') else 10001)
         self.assertEqual(self.client.get('/api/status').status_code, 401)
 
     def test_preview_ignores_runtime_password_and_blocks_mutations(self):
