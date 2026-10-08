@@ -61,6 +61,10 @@ Override có chủ đích dùng image `ipv6-proxy-manager:local` và không pull
 4. Chọn HTTPS probe trả source IPv6 plain text; endpoint phải public. Worker kiểm tra DAD/address readiness + source-bound egress trước commit.
 5. Tạo ít proxy trước; chạy acceptance/benchmark ở [docs/LINUX_ACCEPTANCE.md](docs/LINUX_ACCEPTANCE.md), rồi tăng số lượng có kiểm soát.
 
+Để trống **cả username và mật khẩu** trên form tạo proxy sẽ tự chọn không yêu cầu tài khoản; không dùng lại account đã lưu của pool trước. Nhập một ô thì cần nhập cả hai. Chế độ IP Whitelist vẫn dùng ACL nguồn; no-auth giữ ACL đích nhưng không dùng IP whitelist. API bỏ qua cả hai trường credential vẫn giữ cấu hình xác thực hiện tại để tương thích tự phục hồi khi khởi động.
+
+**Khởi Tạo Lại Proxy Cũ** mặc định bật: tạo thành công sẽ thay pool bằng đúng số lượng mới và dọn alias cũ do tool quản lý. Bỏ chọn để chủ động thêm vào pool hiện tại. Nếu kiểm tra pool mới thất bại, transaction giữ pool cũ thay vì xóa pool đang hoạt động.
+
 Mỗi proxy có IPv6 riêng và port riêng. Dual dùng một HTTP port + một SOCKS5 port (offset mặc định `10000`), tính là **2 dịch vụ**. Giới hạn mặc định **1024 dịch vụ**; `max_connections=64` áp dụng **cho từng dịch vụ/listener**, không phải toàn instance. Validation giới hạn tổng ngân sách `số dịch vụ × max_connections` ở **65536** để tránh cấu hình vượt tài nguyên ngay từ đầu; đây không phải bảo đảm throughput hay số kết nối khả dụng trên mọi host. Outgoing proxy ép IPv6; destination chỉ IPv4 sẽ thất bại.
 
 Bản nâng cấp Linux/Docker: [cải tiến batch, dashboard và vận hành](docs/UPGRADE_20261008.md). Cấu hình đã lưu được giữ nguyên; để áp dụng đúng `maxconn 64` cho deployment hiện có, chạy `docker compose exec -T worker python -c "from rpc import WorkerClient; print(WorkerClient().call('save_settings', {'max_connections': 64}))"`. Settings được kiểm tra và kích hoạt bằng transaction hiện có, không chỉnh tay file 3proxy.

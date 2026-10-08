@@ -70,6 +70,71 @@ function fixture(responses = []) {
     assert(!failed.toasts.some(x => x.type === 'success'));
     console.log('PASS: failed generation performs no settings/user mutation or restart and no success toast');
 
+    for (const oldUsers of [[], [{username: 'old-account'}]]) {
+        const blankAuth = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+            {status: 200, data: {success: true, generated: 5}}]);
+        vm.runInContext(`allUsers = ${JSON.stringify(oldUsers)};`, blankAuth.context);
+        blankAuth.element('auth-user').value = '';
+        blankAuth.element('auth-pass').value = '';
+        await blankAuth.context.generateProxies();
+        assert.deepEqual(blankAuth.calls.map(call => call.url), ['/api/csrf', '/api/proxies/generate']);
+        const body = JSON.parse(blankAuth.calls[1].options.body);
+        assert.equal(body.auth_type, 'none');
+        assert.equal(body.username, '');
+        assert.equal(body.password, '');
+        assert.equal(body.public_proxy, true);
+        assert.equal(body.listener_ipv4, '127.0.0.1');
+        assert.deepEqual(body.allowed_ips, []);
+    }
+    console.log('PASS: blank proxy fields explicitly request no-auth even when old accounts exist, retaining listener/ACL');
+
+    const checkedNoAuth = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+        {status: 200, data: {success: true, generated: 5}}]);
+    checkedNoAuth.element('opt-no-auth').checked = true;
+    checkedNoAuth.element('opt-public').checked = false;
+    await checkedNoAuth.context.generateProxies();
+    const noAuthBody = JSON.parse(checkedNoAuth.calls[1].options.body);
+    assert.equal(noAuthBody.auth_type, 'none');
+    assert.equal(noAuthBody.username, '');
+    assert.equal(noAuthBody.password, '');
+    assert.equal(noAuthBody.public_proxy, true);
+    assert.match(checkedNoAuth.element('status-message').textContent, /Không yêu cầu tài khoản\/mật khẩu/);
+    console.log('PASS: the explicit no-auth option no longer silently returns when Public Proxy is unchecked');
+
+    for (const pair of [['fixture', ''], ['', 'fixture']]) {
+        const partialAuth = fixture();
+        partialAuth.element('auth-user').value = pair[0];
+        partialAuth.element('auth-pass').value = pair[1];
+        await partialAuth.context.generateProxies();
+        assert.equal(partialAuth.calls.length, 0);
+        assert(partialAuth.toasts.some(toast => /cả username và password|cả tài khoản và mật khẩu/i.test(toast.message)));
+    }
+    console.log('PASS: partially blank proxy credentials reject clearly before sending a request');
+
+    const ipAuth = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+        {status: 200, data: {success: true, generated: 5}}]);
+    vm.runInContext("currentSettings = {auth_type: 'ip'};", ipAuth.context);
+    ipAuth.element('auth-user').value = '';
+    ipAuth.element('auth-pass').value = '';
+    ipAuth.element('allowed-ips').value = '192.168.1.0/24';
+    await ipAuth.context.generateProxies();
+    const ipBody = JSON.parse(ipAuth.calls[1].options.body);
+    assert.equal(ipBody.auth_type, 'ip');
+    assert.deepEqual(ipBody.allowed_ips, ['192.168.1.0/24']);
+    assert(!Object.hasOwn(ipBody, 'username'));
+    assert(!Object.hasOwn(ipBody, 'password'));
+    assert.equal(ipBody.public_proxy, false);
+    console.log('PASS: blank fields preserve an explicitly selected IP whitelist instead of disabling its ACL');
+
+    const declinedAuth = fixture();
+    declinedAuth.element('auth-user').value = '';
+    declinedAuth.element('auth-pass').value = '';
+    declinedAuth.context.confirm = () => false;
+    await declinedAuth.context.generateProxies();
+    assert.equal(declinedAuth.calls.length, 0);
+    assert.equal(declinedAuth.element('btn-generate').disabled, undefined);
+    console.log('PASS: declining the no-auth confirmation makes no network or loading-state change');
+
     const bounds = fixture();
     bounds.element('proxy-count').value = '5.5';
     await bounds.context.generateProxies();

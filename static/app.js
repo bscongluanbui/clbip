@@ -601,10 +601,15 @@ async function generateProxies() {
     const count = Number(document.getElementById('proxy-count').value);
     const startPort = Number(document.getElementById('start-port').value);
     const iface = document.getElementById('interface-select').value;
+    const username = document.getElementById('auth-user').value.trim();
+    const password = document.getElementById('auth-pass').value.trim();
     const noAuth = document.getElementById('opt-no-auth').checked;
-    const authType = noAuth ? 'none' : currentSettings.auth_type === 'ip' ? 'ip' : 'userpass';
+    // Empty form fields are an explicit no-auth choice, not omitted API fields
+    // that would silently reuse accounts from the old pool.
+    const authType = noAuth ? 'none' : currentSettings.auth_type === 'ip' ? 'ip' :
+        !username && !password ? 'none' : 'userpass';
     const noRotate = document.getElementById('opt-no-rotate').checked;
-    const publicProxy = document.getElementById('opt-public').checked;
+    const publicProxy = authType === 'none' || document.getElementById('opt-public').checked;
     const recreate = document.getElementById('opt-recreate').checked;
     const autoStart = document.getElementById('opt-autostart').checked;
     const rotationInterval = Number(document.getElementById('rotation-interval').value);
@@ -630,20 +635,19 @@ async function generateProxies() {
         showToast('Protocol hoặc dải port không hợp lệ!', 'warning');
         return;
     }
-    if (recreate && !confirm('Thay thế toàn bộ proxy cũ? Worker sẽ rollback nếu kiểm tra mới thất bại.')) return;
-    if (noAuth && (!publicProxy || !confirm('Xác nhận chạy proxy không mật khẩu với ACL đã cấu hình?'))) return;
-
-    // Handle auth
-    const username = document.getElementById('auth-user').value.trim();
-    const password = document.getElementById('auth-pass').value.trim();
-
     if (!Number.isInteger(rotationInterval) || rotationInterval < 1 || rotationInterval > 10080) {
         showToast('Rotation interval phải là số nguyên 1..10080 phút', 'warning'); return;
     }
-    if (authType === 'userpass' && ((username || password) || allUsers.length === 0) && !validCredentials(username, password)) {
+    if (authType === 'userpass' && (!username || !password)) {
+        showToast('Vui lòng nhập cả username và password, hoặc để trống cả hai để không dùng tài khoản.', 'warning');
+        return;
+    }
+    if (authType === 'userpass' && !validCredentials(username, password)) {
         showToast('Username/password không hợp lệ: ASCII, không space/control hoặc : $ \" \\ # trong password', 'warning');
         return;
     }
+    if (recreate && !confirm('Thay thế toàn bộ proxy cũ? Worker sẽ rollback nếu kiểm tra mới thất bại.')) return;
+    if (authType === 'none' && !confirm('Tài khoản/mật khẩu để trống: tạo proxy không yêu cầu đăng nhập, giữ nguyên listener và ACL đích?')) return;
 
     // UI loading state
     generationInFlight = true;
@@ -660,7 +664,8 @@ async function generateProxies() {
             body: JSON.stringify({
                 subnet, prefix_len: prefixLen, count, start_port: startPort,
                 protocol, interface: iface, recreate,
-                ...(authType === 'userpass' && username && password ? { username, password } : {}),
+                ...(authType === 'ip' ? {} : { username: authType === 'none' ? '' : username,
+                    password: authType === 'none' ? '' : password }),
                 auth_type: authType,
                 rotation_enabled: !noRotate, rotation_interval: rotationInterval,
                 public_proxy: publicProxy, auto_start: autoStart, start: true,
@@ -676,7 +681,7 @@ async function generateProxies() {
         if (result.success) {
             const protoLabel = protocol === 'dual' ? 'Dual (HTTP+SOCKS5)' : protocol.toUpperCase();
             showToast(`Đã tạo ${result.generated} ${protoLabel} proxy!`, 'success');
-            statusMsg.textContent = `✅ Đã tạo ${result.generated} proxy thành công!`;
+            statusMsg.textContent = `✅ Đã tạo ${result.generated} proxy thành công!${authType === 'none' ? ' Không yêu cầu tài khoản/mật khẩu.' : ''}`;
         } else {
             showToast(result.error || 'Lỗi tạo proxy', 'error');
             statusMsg.textContent = `❌ Lỗi: ${result.error}`;

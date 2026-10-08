@@ -16,7 +16,7 @@ import ipv6_manager as network
 import proxy_config as engine
 import network_inventory
 from state_store import StateStore
-from validation import (DEFAULT_SETTINGS, ValidationError, boolean, credential, integer, interface,
+from validation import (DEFAULT_SETTINGS, ValidationError, boolean, credential, generation_auth, integer, interface,
                         public_settings, settings_patch, target_url)
 
 
@@ -624,13 +624,13 @@ class ProxyService:
             raise ValidationError('Generate chứa trường không hỗ trợ')
         state = self.store.read()
         patch = {k: v for k, v in params.items() if k in DEFAULT_SETTINGS}
-        state['settings'] = settings_patch(patch, state['settings'])
+        state['settings'], supplied_credential = generation_auth(params, settings_patch(patch, state['settings']))
         settings = state['settings']
         count = integer(params.get('count', 5), 'count', 1, int(os.environ.get('MAX_PROXY_SERVICES', '1024')))
         recreate = boolean(params.get('recreate', False), 'recreate')
         offset = integer(params.get('socks_port_offset', 10000), 'socks_port_offset', 1, 64511)
-        if 'username' in params or 'password' in params:
-            name, password = credential(params.get('username'), params.get('password'))
+        if supplied_credential is not None:
+            name, password = supplied_credential
             # Explicit combined generation updates an existing credential atomically.
             state['users'] = [u for u in state['users'] if u['username'] != name]
             state['users'].append({'username': name, 'password': password, 'created_at': time.strftime('%Y-%m-%d %H:%M:%S')})

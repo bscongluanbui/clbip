@@ -59,6 +59,31 @@ def credential(username, password):
     return username, password
 
 
+def generation_auth(params, settings):
+    """Normalize only explicit form credentials; absent API fields retain auth.
+
+    Two empty strings explicitly request password-free proxies. Existing users
+    remain available for a later switch back to userpass, but none/IP configs
+    never use those stored credentials. Saved listener/allowlist values remain;
+    source allowlists are enforced when the selected mode is IP whitelist.
+    """
+    result = dict(settings)
+    supplied = {'username', 'password'} & set(params)
+    if not supplied:
+        return result, None
+    if supplied != {'username', 'password'}:
+        raise ValidationError('Cần nhập cả username và password, hoặc để trống cả hai')
+    username = text(params['username'], 'username', 64)
+    password = text(params['password'], 'password', 256)
+    if not username and not password:
+        if result['auth_type'] != 'ip':
+            result.update(auth_type='none', public_proxy=True)
+        return result, None
+    if not username or not password:
+        raise ValidationError('Cần nhập cả username và password, hoặc để trống cả hai')
+    return result, credential(username, password)
+
+
 def interface(value):
     value = text(value, 'interface', 15, False)
     if not re.fullmatch(r'[A-Za-z0-9_.:-]+', value) or value.startswith('-'):

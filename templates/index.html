@@ -193,13 +193,13 @@
                     <!-- Row 3 -->
                     <div class="form-group">
                         <label>User/Tài khoản:</label>
-                        <input type="text" id="auth-user" placeholder="Enter username..." class="input-field">
+                        <input type="text" id="auth-user" placeholder="Để trống cùng mật khẩu: không dùng tài khoản" class="input-field" aria-describedby="proxy-auth-hint">
                     </div>
                     <div class="form-group checkbox-row">
                         <label class="checkbox-label">
                             <input type="checkbox" id="opt-no-auth">
                             <span class="checkmark"></span>
-                            Không cài bảo mật
+                            Không yêu cầu tài khoản/mật khẩu
                         </label>
                         <label class="checkbox-label">
                             <input type="checkbox" id="opt-public">
@@ -211,7 +211,8 @@
                     <!-- Row 4 -->
                     <div class="form-group">
                         <label>Password/Mật khẩu:</label>
-                        <input type="password" id="auth-pass" placeholder="Enter password..." class="input-field">
+                        <input type="password" id="auth-pass" placeholder="Để trống cùng tài khoản: không dùng mật khẩu" class="input-field" aria-describedby="proxy-auth-hint">
+                        <small id="proxy-auth-hint">Để trống cả hai ô: proxy không yêu cầu tài khoản/mật khẩu. Nhập tài khoản thì cần nhập cả mật khẩu. Chế độ IP Whitelist vẫn giữ ACL.</small>
                     </div>
                     <div class="form-group checkbox-row">
                         <label class="checkbox-label">
@@ -220,7 +221,7 @@
                             Không xoay IP
                         </label>
                         <label class="checkbox-label">
-                            <input type="checkbox" id="opt-recreate">
+                            <input type="checkbox" id="opt-recreate" checked>
                             <span class="checkmark"></span>
                             Khởi Tạo Lại Proxy Cũ
                         </label>
