@@ -1,0 +1,159 @@
+name: checks
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check frontend and shell
+        run: |
+          node --check static/app.js
+          node tests/test_frontend.js
+          node tests/test_frontend_upgrade.js
+          bash -n start.sh
+          docker compose config --quiet
+      - name: Install exact dependency artifacts
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements.txt
+      - name: Python unit tests
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Build pinned image
+        run: docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg VCS_REF="${GITHUB_SHA}"
+      - name: Real 3proxy in isolated Linux network namespace
+        run: |
+          docker run --rm --network none --user 0:10001 --cap-drop ALL --cap-add NET_ADMIN \
+            --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=64m \
+            --tmpfs /app/data:rw,nosuid,size=64m -e IPV6_INTEGRATION_ISOLATED=1 \
+            --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
+            --entrypoint python ipv6-proxy-manager:local /tests/integration_linux.py --run
+      - name: Isolated worker/dashboard roles and authenticated IPC
+        run: .venv/bin/python tests/integration_roles.py --run
+      - name: Generate image package inventory
+        run: docker run --rm --entrypoint pip ipv6-proxy-manager:local list --format=json > image-python-packages.json
+      - name: Generate full image CycloneDX SBOM (OS and application packages)
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
+        with:
+          image: ipv6-proxy-manager:local
+          syft-version: v1.38.0
+          format: cyclonedx-json
+          output-file: image-sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - name: Include source-built 3proxy and verify image coverage
+        run: |
+          docker run --rm --entrypoint python ipv6-proxy-manager:local -c 'import hashlib,json,pathlib; print(json.dumps({"binary_sha256":hashlib.sha256(pathlib.Path("/usr/local/bin/3proxy").read_bytes()).hexdigest()}))' > image-3proxy.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re
+          dockerfile = pathlib.Path('Dockerfile').read_text()
+          version = re.search(r'^ARG THREEPROXY_VERSION=(\S+)$', dockerfile, re.M).group(1)
+          source_hash = re.search(r'^ARG THREEPROXY_SHA256=([0-9a-f]{64})$', dockerfile, re.M).group(1)
+          path = pathlib.Path('image-sbom.cdx.json')
+          sbom = json.loads(path.read_text())
+          components = sbom['components']
+          assert any(c.get('purl', '').startswith('pkg:deb/') for c in components), 'OS package coverage missing'
+          assert any(c.get('purl', '').startswith('pkg:pypi/') for c in components), 'Python package coverage missing'
+          binary = json.loads(pathlib.Path('image-3proxy.json').read_text())['binary_sha256']
+          assert re.fullmatch('[0-9a-f]{64}', binary), 'Invalid image binary digest'
+          components.append({'type': 'application', 'name': '3proxy', 'version': version,
+              'bom-ref': 'source-built-3proxy', 'purl': 'pkg:generic/3proxy@' + version,
+              'hashes': [{'alg': 'SHA-256', 'content': binary}],
+              'externalReferences': [{'type': 'vcs', 'url': 'https://github.com/3proxy/3proxy'}],
+              'properties': [{'name': 'build:source_sha256', 'value': source_hash},
+                             {'name': 'build:source_version', 'value': version},
+                             {'name': 'image:binary_path', 'value': '/usr/local/bin/3proxy'}]})
+          path.write_text(json.dumps(sbom, indent=2) + '\n')
+          image = json.loads(__import__('subprocess').check_output(['docker', 'image', 'inspect', 'ipv6-proxy-manager:local']))[0]
+          pathlib.Path('image-build-metadata.json').write_text(json.dumps({
+              'image_id': image['Id'], 'repo_digests': image.get('RepoDigests', []),
+              'dockerfile_sha256': hashlib.sha256(pathlib.Path('Dockerfile').read_bytes()).hexdigest(),
+              'requirements_sha256': hashlib.sha256(pathlib.Path('requirements.txt').read_bytes()).hexdigest(),
+              'sbom_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}, indent=2) + '\n')
+          print('IMAGE_SBOM_OS_AND_PYTHON=PASS SOURCE_BUILT_3PROXY=INCLUDED')
+          PY
+      - name: Scan full image SBOM for vulnerabilities
+        uses: anchore/scan-action@2c901ab7378897c01b8efaa2d0c9bf519cc64b9e # v6.2.0
+        with:
+          sbom: image-sbom.cdx.json
+          grype-version: v0.104.1
+          output-format: json
+          output-file: image-vulnerabilities.json
+          severity-cutoff: high
+          fail-build: true
+          only-fixed: false
+          cache-db: false
+      - name: Preserve reproducible image SBOM and scan evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-security-evidence
+          path: |
+            image-python-packages.json
+            image-3proxy.json
+            image-sbom.cdx.json
+            image-build-metadata.json
+            image-vulnerabilities.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish the exact tested image to GHCR
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          docker tag ipv6-proxy-manager:local "$IMAGE:sha-$GITHUB_SHA"
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Expected a vMAJOR.MINOR.PATCH tag'; exit 1; }
+            docker tag ipv6-proxy-manager:local "$IMAGE:$TAG"
+            docker push "$IMAGE:$TAG"
+          fi
+          docker tag ipv6-proxy-manager:local "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+          IMAGE="$IMAGE" python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          image = os.environ['IMAGE']
+          inspected = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image + ':latest']))[0]
+          digest = next(d for d in inspected['RepoDigests'] if d.startswith(image + '@sha256:'))
+          record = {'image': image, 'digest': digest, 'image_id': inspected['Id'],
+                    'commit': os.environ['GITHUB_SHA'], 'platform': 'linux/amd64',
+                    'tags': ['latest', 'sha-' + os.environ['GITHUB_SHA']]}
+          if os.environ['GITHUB_REF'].startswith('refs/tags/v'):
+              record['tags'].append(os.environ['GITHUB_REF'].removeprefix('refs/tags/'))
+          pathlib.Path('container-release.json').write_text(json.dumps(record, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('## Published tested container\n\n`' + digest + '`\n\nCommit: `' + record['commit'] + '`\n')
+          print('CONTAINER_PUBLISHED=' + digest)
+          PY
+      - name: Verify the published digest can be pulled
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        run: |
+          DIGEST=$(python3 -c 'import json; print(json.load(open("container-release.json"))["digest"])')
+          docker pull "$DIGEST"
+          docker run --rm --network none --entrypoint python "$DIGEST" -c 'import app, credentials, network_inventory; from validation import DEFAULT_SETTINGS; assert DEFAULT_SETTINGS["max_connections"] == 64; print("PUBLISHED_IMPORTS=OK MAXCONN=64")'
+      - name: Preserve container release digest
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-release
+          path: container-release.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,73 @@
+name: ipv6-proxy-manager
+x-common: &common
+  image: "${IPV6_MANAGER_IMAGE:-ghcr.io/bscongluanbui/clbip:latest}"
+  restart: unless-stopped
+  init: true
+  network_mode: host
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+  ulimits:
+    nofile: {soft: 65535, hard: 65535}
+  stop_grace_period: 45s
+services:
+  worker:
+    <<: *common
+    user: "0:10001"
+    cap_add: [NET_ADMIN]
+    environment:
+      APP_ROLE: worker
+      DATA_DIR: /app/data
+      WORKER_SOCKET: /run/ipv6-manager/worker.sock
+      SERVICE_TOKEN_FILE: /run/secrets/service_token
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      DASHBOARD_PASSWORD_PATH: /var/lib/ipv6-manager-credentials/admin_password
+      DNS_CACHE_ENABLED: "${DNS_CACHE_ENABLED:-0}"
+    secrets: [service_token, admin_password]
+    volumes:
+      - proxy-data:/app/data
+      - worker-runtime:/run/ipv6-manager
+      - dashboard-credentials:/var/lib/ipv6-manager-credentials
+    healthcheck:
+      test: [CMD, python, -c, "from rpc import WorkerClient; raise SystemExit(0 if WorkerClient().call('health').get('ready') else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  dashboard:
+    <<: *common
+    user: "10001:10001"
+    environment:
+      APP_ROLE: dashboard
+      GUI_BIND: "${GUI_BIND:-127.0.0.1}"
+      GUI_PORT: "${GUI_PORT:-7070}"
+      WORKER_SOCKET: /run/ipv6-manager/worker.sock
+      SERVICE_TOKEN_FILE: /run/secrets/service_token
+      SECRET_KEY_FILE: /run/secrets/secret_key
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      DASHBOARD_PASSWORD_PATH: /var/lib/ipv6-manager-credentials/admin_password
+      TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-0}"
+      TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
+      SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-0}"
+    secrets: [service_token, secret_key, admin_password]
+    volumes:
+      - worker-runtime:/run/ipv6-manager:ro
+      - dashboard-credentials:/var/lib/ipv6-manager-credentials:ro
+    depends_on:
+      # Keep login/status available while the worker waits for the router after
+      # a power outage. Readiness still stays false until all proxies are ready.
+      worker: {condition: service_started}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('GUI_PORT','7070')+'/readyz',timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  proxy-data:
+  worker-runtime:
+  dashboard-credentials:
+secrets:
+  service_token: {file: ./secrets/service_token}
+  secret_key: {file: ./secrets/secret_key}
+  admin_password: {file: ./secrets/admin_password}

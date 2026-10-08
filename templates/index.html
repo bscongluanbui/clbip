@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="IPv6 Proxy Manager - Quản lý proxy IPv6 với giao diện web hiện đại">
+    <title>IPv6 Proxy Manager</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    {% if config.get('PREVIEW') %}<div class="preview-banner" role="status">PREVIEW — dữ liệu giả, chỉ xem giao diện; không tạo IPv6 hoặc thay đổi dịch vụ.</div>{% endif %}
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">⚡</span>
+                <div>
+                    <h1 class="logo-title">PROXY</h1>
+                    <span class="logo-subtitle">IPv6 GENERATOR</span>
+                </div>
+            </div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item active" data-page="create" id="nav-create">
+                <span class="nav-icon">🌐</span>
+                <span>Tạo Proxy IPv6</span>
+            </a>
+            <a href="#" class="nav-item" data-page="list" id="nav-list">
+                <span class="nav-icon">📋</span>
+                <span>Danh Sách Proxy</span>
+            </a>
+            <a href="#" class="nav-item" data-page="users" id="nav-users">
+                <span class="nav-icon">👤</span>
+                <span>Quản Lý User</span>
+            </a>
+            <a href="#" class="nav-item" data-page="speedtest" id="nav-speedtest">
+                <span class="nav-icon">⚡</span>
+                <span>Speed Test</span>
+            </a>
+            <a href="#" class="nav-item" data-page="tools" id="nav-tools">
+                <span class="nav-icon">🛠️</span>
+                <span>Công Cụ Phụ Trợ</span>
+            </a>
+            <a href="#" class="nav-item" data-page="logs" id="nav-logs">
+                <span class="nav-icon">📄</span>
+                <span>Nhật Ký</span>
+            </a>
+            <div style="flex-grow: 1;"></div>
+            <button type="button" data-click-action="logout" class="nav-item" style="margin-top: auto; color: var(--danger);">
+                <span class="nav-icon">🚪</span>
+                <span>Đăng Xuất</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="status-indicator" id="global-status">
+                <span class="status-dot offline"></span>
+                <span class="status-text">3proxy: Offline</span>
+            </div>
+            <div class="version-info">v1.2 • Multi-Instance Engine</div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content" id="main-content">
+        
+        <!-- ===== PAGE: CREATE PROXY ===== -->
+        <section class="page active" id="page-create">
+            <div class="page-header">
+                <h2 class="page-title">CẤU HÌNH TẠO PROXY IPv6</h2>
+                <div class="header-stats">
+                    <div class="stat-badge" id="stat-total">
+                        <span class="stat-value">0</span>
+                        <span class="stat-label">Proxy</span>
+                    </div>
+                    <div class="stat-badge" id="stat-instances">
+                        <span class="stat-value">0/0</span>
+                        <span class="stat-label">Instances</span>
+                    </div>
+                    <div class="stat-badge"><span class="stat-value" id="desired-state">-</span><span class="stat-label">Desired state</span></div>
+                <div class="stat-badge running" id="stat-running">
+                        <span class="stat-value">-</span>
+                        <span class="stat-label">Trạng thái</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card build-progress-card" id="build-progress-panel" aria-live="polite" style="margin-bottom: 16px;">
+                <h3 class="card-title">Tiến Độ Tạo Pool</h3>
+                <p id="build-progress-stage">Chờ thao tác</p>
+                <p id="build-progress-counts">Alias: 0/0 · DAD: 0/0 · Egress: 0/0</p>
+                <div class="progress-bar" id="build-progress-bar" role="progressbar" aria-label="IPv6 đã xác minh Internet" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div class="progress-fill" id="build-progress-fill" style="width: 0%;"></div>
+                </div>
+                <p id="build-progress-detail" class="network-detail">Chưa có heartbeat</p>
+                <p id="current-source-status" class="network-detail">Đang đọc IPv6 gốc...</p>
+                <p id="dashboard-access-urls" class="network-detail"></p>
+            </div>
+
+            <div class="card" role="status" aria-live="polite" style="margin-bottom: 16px;">
+                <p id="startup-recovery-status">Đang đọc trạng thái khôi phục sau khởi động...</p>
+                <p id="startup-recovery-detail" style="overflow-wrap: anywhere;"></p>
+            </div>
+
+            <!-- Health Monitor -->
+            <div class="card health-card" id="health-card" style="margin-bottom: 16px;">
+                <div class="health-grid">
+                    <div class="health-item">
+                        <span class="health-icon">⚡</span>
+                        <div>
+                            <span class="health-value" id="health-established">-</span>
+                            <span class="health-label">Active Connections</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon">⏳</span>
+                        <div>
+                            <span class="health-value" id="health-timewait">-</span>
+                            <span class="health-label">TIME_WAIT</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon">📀</span>
+                        <div>
+                            <span class="health-value" id="health-memory">-</span>
+                            <span class="health-label">Memory</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon">⏱</span>
+                        <div>
+                            <span class="health-value" id="health-uptime">-</span>
+                            <span class="health-label">Uptime</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card config-card">
+                <div class="config-grid">
+                    <div class="form-group">
+                        <label for="topology-mode">Topology IPv6:</label>
+                        <select id="topology-mode" class="input-field"><option value="lan">LAN trực tiếp router (on-link)</option><option value="routed">Prefix được router route tới host</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="routed-prefix">Routed prefix (chỉ chế độ routed):</label>
+                        <input id="routed-prefix" class="input-field" placeholder="Prefix thực tế được route tới host">
+                    </div>
+                    <div class="form-group">
+                        <label for="listener-ipv4">IPv4 lắng nghe proxy:</label>
+                        <input id="listener-ipv4" class="input-field" value="127.0.0.1" placeholder="127.0.0.1 hoặc IPv4 LAN của host">
+                    </div>
+                    <div class="form-group">
+                        <label for="allowed-ips">ACL nguồn IPv4/CIDR (mỗi dòng một mạng):</label>
+                        <textarea id="allowed-ips" class="input-field" rows="3" placeholder="192.168.1.0/24"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="probe-url">HTTPS endpoint kiểm tra IPv6:</label>
+                        <input id="probe-url" class="input-field" value="https://api64.ipify.org" placeholder="Endpoint trả về source IPv6 dạng plain text">
+                        <small>Worker bind source IPv6, kiểm tra egress trước khi commit.</small>
+                    </div>
+                    <!-- Row 1 -->
+                    <div class="form-group">
+                        <label>Bắt đầu từ Port:</label>
+                        <input type="number" id="start-port" value="10000" min="1024" max="65535" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Interface:</label>
+                        <select id="interface-select" class="input-field" data-change-action="onInterfaceChange" data-action-value="true">
+                            <option value="eth0">eth0</option>
+                        </select>
+                        <p id="interface-detail" class="network-detail" role="status" aria-live="polite"></p>
+                        <div class="subnet-detected" id="subnet-detected" style="display:none;">
+                            <div class="subnet-detected-label">🔍 Subnet IPv6 phát hiện:</div>
+                            <div class="subnet-list" id="subnet-list"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Row 2 -->
+                    <div class="form-group">
+                        <label>Số Proxy muốn tạo:</label>
+                        <input type="number" id="proxy-count" value="5" min="1" max="1024" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>IPv6 Subnet:</label>
+                        <input type="text" id="ipv6-subnet" placeholder="2001:db8:abcd::" class="input-field">
+                    </div>
+
+                    <!-- Row 3 -->
+                    <div class="form-group">
+                        <label>User/Tài khoản:</label>
+                        <input type="text" id="auth-user" placeholder="Enter username..." class="input-field">
+                    </div>
+                    <div class="form-group checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="opt-no-auth">
+                            <span class="checkmark"></span>
+                            Không cài bảo mật
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="opt-public">
+                            <span class="checkmark"></span>
+                            Public Proxy
+                        </label>
+                    </div>
+
+                    <!-- Row 4 -->
+                    <div class="form-group">
+                        <label>Password/Mật khẩu:</label>
+                        <input type="password" id="auth-pass" placeholder="Enter password..." class="input-field">
+                    </div>
+                    <div class="form-group checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="opt-no-rotate">
+                            <span class="checkmark"></span>
+                            Không xoay IP
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="opt-recreate">
+                            <span class="checkmark"></span>
+                            Khởi Tạo Lại Proxy Cũ
+                        </label>
+                    </div>
+
+                    <!-- Row 5 -->
+                    <div class="form-group">
+                        <label>Thời Gian Xoay IP (Phút):</label>
+                        <input type="number" id="rotation-interval" value="10" min="1" max="10080" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Netmask:</label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="netmask" value="48">
+                                <span class="radio-mark"></span>
+                                /48
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="netmask" value="64" checked>
+                                <span class="radio-mark"></span>
+                                /64
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="netmask" value="80">
+                                <span class="radio-mark"></span>
+                                /80
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="netmask" value="128">
+                                <span class="radio-mark"></span>
+                                /128
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Row 6 -->
+                    <div class="form-group">
+                        <label>Protocol:</label>
+                        <div class="radio-group">
+                            <label class="radio-label">
+                                <input type="radio" name="protocol" value="http" checked>
+                                <span class="radio-mark"></span>
+                                HTTP
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="protocol" value="socks5">
+                                <span class="radio-mark"></span>
+                                SOCKS5
+                            </label>
+                            <label class="radio-label">
+                                <input type="radio" name="protocol" value="dual">
+                                <span class="radio-mark"></span>
+                                Dual (HTTP+SOCKS5)
+                            </label>
+                        </div>
+                        <div class="dual-info" id="dual-protocol-info" style="display:none;">
+                            <small>⚡ Mỗi IPv6 sẽ có 2 port: HTTP (port chính) + SOCKS5 (port + 10000)</small>
+                        </div>
+                    </div>
+                    <div class="form-group checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="opt-autostart">
+                            <span class="checkmark"></span>
+                            Tự chạy Proxy khi mở App
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Action Button -->
+            <button class="btn-primary btn-generate" id="btn-generate" data-click-action="generateProxies">
+                <span class="btn-icon">🚀</span>
+                BẮT ĐẦU CHẠY PROXY
+            </button>
+
+            <!-- Control Buttons -->
+            <div class="control-bar">
+                <button class="btn-control btn-start" data-click-action="startProxy">
+                    <span>▶</span> Start
+                </button>
+                <button class="btn-control btn-stop" data-click-action="stopProxy">
+                    <span>⏹</span> Stop
+                </button>
+                <button class="btn-control btn-restart" data-click-action="restartProxy">
+                    <span>🔄</span> Restart
+                </button>
+            </div>
+
+            <!-- Status Bar -->
+            <div class="status-bar" id="status-bar">
+                <span class="status-label">Trạng thái:</span>
+                <span class="status-message" id="status-message">Sẵn sàng</span>
+            </div>
+        </section>
+
+        <!-- ===== PAGE: PROXY LIST ===== -->
+        <section class="page" id="page-list">
+            <div class="page-header">
+                <h2 class="page-title">DANH SÁCH PROXY ĐÃ TẠO</h2>
+                <div class="header-actions">
+                    <div class="export-group">
+                        <button class="btn-outline" data-click-action="exportProxies" data-action-arg="ip_port">
+                            📥 Export IP:Port
+                        </button>
+                        <button class="btn-outline" data-click-action="exportProxies" data-action-arg="ip_port_user_pass">
+                            📥 Export Full
+                        </button>
+                        <button class="btn-outline" data-click-action="exportProxies" data-action-arg="full_url">
+                            📥 Export URL
+                        </button>
+                    </div>
+                    <div class="export-group">
+                        <select id="export-protocol-filter" class="input-field" style="width: 160px; padding: 6px 10px; font-size: 12px;">
+                            <option value="all">Tất cả Protocol</option>
+                            <option value="http">Chỉ HTTP</option>
+                            <option value="socks5">Chỉ SOCKS5</option>
+                        </select>
+                        <button class="btn-outline btn-danger" data-click-action="deleteAllProxies">
+                            🗑️ Xóa Tất Cả
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Search & Filter -->
+            <div class="card filter-card">
+                <div class="filter-row">
+                    <input type="text" id="search-proxy" placeholder="🔍 Tìm kiếm theo IPv6, Port..." class="input-field search-field" data-input-action="filterProxies">
+                    <select id="filter-protocol" class="input-field filter-select" data-change-action="filterProxies">
+                        <option value="all">Tất cả Protocol</option>
+                        <option value="http">HTTP</option>
+                        <option value="socks5">SOCKS5</option>
+                    </select>
+                    <button class="btn-outline" data-click-action="refreshProxyList">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <!-- Proxy Table -->
+            <div class="card table-card">
+                <div class="table-wrapper">
+                    <table class="proxy-table" id="proxy-table">
+                        <thead>
+                            <tr>
+                                <th class="th-check"><input type="checkbox" id="check-all" data-change-action="toggleCheckAll"></th>
+                                <th>#</th>
+                                <th>IPv6 Address</th>
+                                <th>HTTP Port</th>
+                                <th>SOCKS5 Port</th>
+                                <th>Protocol</th>
+                                <th>Trạng Thái</th>
+                                <th>Ngày Tạo</th>
+                                <th>Hành Động</th>
+                            </tr>
+                        </thead>
+                        <tbody id="proxy-tbody">
+                            <tr class="empty-row">
+                                <td colspan="9">
+                                    <div class="empty-state">
+                                        <span class="empty-icon">📡</span>
+                                        <p>Chưa có proxy nào. Hãy tạo proxy mới!</p>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="table-footer">
+                    <span id="table-count">0 proxy</span>
+                </div>
+            </div>
+
+            <!-- Export Modal -->
+            <div class="modal" id="export-modal">
+                <div class="modal-backdrop" data-click-action="closeExportModal"></div>
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>📥 Export Proxy List</h3>
+                        <button class="modal-close" data-click-action="closeExportModal">✕</button>
+                    </div>
+                    <div class="modal-body">
+                        <textarea id="export-content" class="export-textarea" readonly></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn-primary" data-click-action="copyExport">📋 Copy</button>
+                        <button class="btn-outline" data-click-action="downloadExport">💾 Download</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== PAGE: USER MANAGEMENT ===== -->
+        <section class="page" id="page-users">
+            <div class="page-header">
+                <h2 class="page-title">QUẢN LÝ USER / AUTHENTICATION</h2>
+            </div>
+
+            <div class="users-layout">
+                <!-- Add User Form -->
+                <div class="card user-form-card">
+                    <h3 class="card-title">➕ Thêm User Mới</h3>
+                    <div class="form-group">
+                        <label>Username:</label>
+                        <input type="text" id="new-username" placeholder="Nhập username..." class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Password:</label>
+                        <input type="password" id="new-password" placeholder="Nhập password..." class="input-field">
+                    </div>
+                    <button class="btn-primary" data-click-action="addUser">
+                        <span>👤</span> Thêm User
+                    </button>
+                </div>
+
+                <!-- User List -->
+                <div class="card user-list-card">
+                    <h3 class="card-title">📋 Danh Sách User</h3>
+                    <div class="user-list" id="user-list">
+                        <div class="empty-state">
+                            <span class="empty-icon">👤</span>
+                            <p>Chưa có user nào</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Auth Settings -->
+            <div class="card">
+                <h3 class="card-title">🔒 Cấu Hình Authentication</h3>
+                <div class="auth-options">
+                    <label class="radio-label large">
+                        <input type="radio" name="auth-type" value="userpass" checked data-change-action="updateAuthType" data-action-value="true">
+                        <span class="radio-mark"></span>
+                        <div>
+                            <strong>Username/Password</strong>
+                            <p class="radio-desc">Yêu cầu đăng nhập khi sử dụng proxy</p>
+                        </div>
+                    </label>
+                    <label class="radio-label large">
+                        <input type="radio" name="auth-type" value="none" data-change-action="updateAuthType" data-action-value="true">
+                        <span class="radio-mark"></span>
+                        <div>
+                            <strong>Không bảo mật (Open)</strong>
+                            <p class="radio-desc">Ai cũng có thể sử dụng proxy (không khuyến khích)</p>
+                        </div>
+                    </label>
+                    <label class="radio-label large">
+                        <input type="radio" name="auth-type" value="ip" data-change-action="updateAuthType" data-action-value="true">
+                        <span class="radio-mark"></span>
+                        <div>
+                            <strong>IP Whitelist</strong>
+                            <p class="radio-desc">Chỉ cho phép IP cụ thể truy cập</p>
+                        </div>
+                    </label>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== PAGE: SPEED TEST ===== -->
+        <section class="page" id="page-speedtest">
+            <div class="page-header">
+                <h2 class="page-title">⚡ SPEED TEST PROXY</h2>
+                <div class="header-stats">
+                    <div class="stat-badge" id="speedtest-avg-ttfb">
+                        <span class="stat-value">-</span>
+                        <span class="stat-label">Avg TTFB</span>
+                    </div>
+                    <div class="stat-badge" id="speedtest-avg-total">
+                        <span class="stat-value">-</span>
+                        <span class="stat-label">Avg Total</span>
+                    </div>
+                    <div class="stat-badge running" id="speedtest-success-rate">
+                        <span class="stat-value">-</span>
+                        <span class="stat-label">Thành công</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Single Proxy Test -->
+            <div class="card speedtest-config-card">
+                <h3 class="card-title">🎯 Test Proxy Đơn</h3>
+                <div class="speedtest-form">
+                    <div class="form-group">
+                        <label>Proxy Port:</label>
+                        <input type="number" id="speedtest-port" value="10000" class="input-field" placeholder="10000">
+                    </div>
+                    <div class="form-group">
+                        <label>Target URL:</label>
+                        <select id="speedtest-url" class="input-field" data-change-action="onSpeedtestUrlChange">
+                            <option value="https://www.bing.com">bing.com</option>
+                            <option value="https://rewards.bing.com">rewards.bing.com</option>
+                            <option value="https://www.google.com">google.com</option>
+                            <option value="custom">Custom URL...</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="speedtest-custom-url-group" style="display:none;">
+                        <label>Custom URL:</label>
+                        <input type="text" id="speedtest-custom-url" placeholder="https://example.com" class="input-field">
+                    </div>
+                    <button class="btn-primary" data-click-action="runSingleSpeedtest" id="btn-speedtest-single">
+                        🚀 Test Proxy
+                    </button>
+                </div>
+
+                <!-- Single Test Result -->
+                <div class="speedtest-single-result" id="speedtest-single-result" style="display:none;">
+                    <div class="speedtest-timing-grid">
+                        <div class="timing-item">
+                            <span class="timing-label">DNS Lookup</span>
+                            <span class="timing-value" id="st-dns">-</span>
+                        </div>
+                        <div class="timing-item">
+                            <span class="timing-label">TCP Connect</span>
+                            <span class="timing-value" id="st-connect">-</span>
+                        </div>
+                        <div class="timing-item">
+                            <span class="timing-label">TLS Handshake</span>
+                            <span class="timing-value" id="st-tls">-</span>
+                        </div>
+                        <div class="timing-item">
+                            <span class="timing-label">TTFB</span>
+                            <span class="timing-value" id="st-ttfb">-</span>
+                        </div>
+                        <div class="timing-item highlight">
+                            <span class="timing-label">Total Time</span>
+                            <span class="timing-value" id="st-total">-</span>
+                        </div>
+                        <div class="timing-item">
+                            <span class="timing-label">Speed</span>
+                            <span class="timing-value" id="st-speed">-</span>
+                        </div>
+                        <div class="timing-item">
+                            <span class="timing-label">HTTP Code</span>
+                            <span class="timing-value" id="st-code">-</span>
+                        </div>
+                        <div class="timing-item">
+                            <span class="timing-label">Remote IP</span>
+                            <span class="timing-value" id="st-remote-ip">-</span>
+                        </div>
+                    </div>
+                    <!-- Visual Timing Bar -->
+                    <div class="timing-bar-container" id="timing-bar-container" style="display:none;">
+                        <div class="timing-bar">
+                            <div class="timing-segment dns" id="bar-dns" title="DNS"></div>
+                            <div class="timing-segment connect" id="bar-connect" title="Connect"></div>
+                            <div class="timing-segment tls" id="bar-tls" title="TLS"></div>
+                            <div class="timing-segment ttfb" id="bar-ttfb" title="TTFB"></div>
+                            <div class="timing-segment download" id="bar-download" title="Download"></div>
+                        </div>
+                        <div class="timing-bar-legend">
+                            <span class="legend-item"><span class="legend-dot dns"></span>DNS</span>
+                            <span class="legend-item"><span class="legend-dot connect"></span>Connect</span>
+                            <span class="legend-item"><span class="legend-dot tls"></span>TLS</span>
+                            <span class="legend-item"><span class="legend-dot ttfb"></span>TTFB</span>
+                            <span class="legend-item"><span class="legend-dot download"></span>Download</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Batch Speed Test -->
+            <div class="card">
+                <h3 class="card-title">📊 Batch Test (Nhiều Proxy)</h3>
+                <div class="speedtest-form">
+                    <div class="form-group">
+                        <label>Số proxy test (tối đa):</label>
+                        <input type="number" id="speedtest-batch-count" value="10" min="1" max="50" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Target URL:</label>
+                        <select id="speedtest-batch-url" class="input-field">
+                            <option value="https://www.bing.com">bing.com</option>
+                            <option value="https://rewards.bing.com">rewards.bing.com</option>
+                            <option value="https://www.google.com">google.com</option>
+                        </select>
+                    </div>
+                    <button class="btn-primary" data-click-action="runBatchSpeedtest" id="btn-speedtest-batch">
+                        📊 Test Tất Cả
+                    </button>
+                </div>
+
+                <!-- Batch Progress -->
+                <div class="speedtest-progress" id="speedtest-progress" style="display:none;">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="speedtest-progress-fill"></div>
+                    </div>
+                    <span class="progress-text" id="speedtest-progress-text">Đang test...</span>
+                </div>
+
+                <!-- Batch Results Table -->
+                <div class="speedtest-batch-results" id="speedtest-batch-results" style="display:none;">
+                    <div class="table-wrapper">
+                        <table class="proxy-table speedtest-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Port</th>
+                                    <th>IPv6</th>
+                                    <th>DNS</th>
+                                    <th>Connect</th>
+                                    <th>TTFB</th>
+                                    <th>Total</th>
+                                    <th>Speed</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="speedtest-batch-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Auto Optimize -->
+            <div class="card optimize-card">
+                <h3 class="card-title">🔧 Kiểm Tra & Phục Hồi Source IPv6</h3>
+                <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+                    Source-bound egress probe hai lần. Chỉ thay IPv6 thất bại cả hai lần; website chậm không chứng minh IPv6 bị lỗi.
+                </p>
+                <div class="speedtest-form">
+                    <button class="btn-primary btn-optimize" data-click-action="runAutoOptimize" id="btn-optimize">
+                        🔧 Tối Ưu Proxy
+                    </button>
+                </div>
+                <div class="optimize-result" id="optimize-result" style="display:none;"></div>
+            </div>
+        </section>
+
+        <!-- ===== PAGE: TOOLS ===== -->
+        <section class="page" id="page-tools">
+            <div class="page-header">
+                <h2 class="page-title">CÔNG CỤ PHỤ TRỢ</h2>
+            </div>
+
+            <div class="tools-grid">
+                <div class="card tool-card">
+                    <h3 class="card-title">Khôi Phục Sau Khởi Động / Mất Điện</h3>
+                    <div class="form-group">
+                        <label class="checkbox-label" for="startup-rebuild-enabled">
+                            <input type="checkbox" id="startup-rebuild-enabled" aria-describedby="startup-recovery-help">
+                            <span class="checkmark"></span>
+                            Tạo lại proxy khi khởi động
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label for="startup-proxy-count">Số proxy tạo lại:</label>
+                        <input type="number" id="startup-proxy-count" min="1" max="1024" step="1" value="25" class="input-field" aria-describedby="startup-recovery-help">
+                    </div>
+                    <p id="startup-recovery-help" style="color: var(--text-secondary); font-size: 13px; margin: 12px 0;">
+                        Chờ IPv6 gốc có kết nối Internet và xác minh prefix nhà mạng; chỉ dọn IPv6 do tool quản lý,
+                        không xóa IPv6 hệ thống. Tool thay thế toàn bộ proxy đã quản lý, kể cả trên interface khác,
+                        rồi tạo lại số lượng trên interface đã lưu với port bắt đầu, protocol và tài khoản đã cấu hình.
+                        Dual tối đa 512 proxy theo giới hạn 1024 dịch vụ mặc định.
+                        Cấu hình áp dụng ở lần khởi động worker tiếp theo. Stop thủ công giữ trạng thái dừng cho đến khi bấm Start.
+                    </p>
+                    <button class="btn-primary" id="btn-save-startup-recovery" data-click-action="saveStartupRecoverySettings">Lưu Khôi Phục Khi Khởi Động</button>
+                    <p id="startup-recovery-save-status" role="status" aria-live="polite"></p>
+                    <p id="startup-recovery-tool-status" role="status" aria-live="polite">Đang đọc trạng thái khôi phục...</p>
+                    <p id="startup-recovery-tool-detail" style="overflow-wrap: anywhere;"></p>
+                </div>
+
+                <!-- DNS Settings -->
+                <div class="card tool-card">
+                    <h3 class="card-title">🌍 DNS Server</h3>
+                    <div class="form-group">
+                        <label>DNS Primary:</label>
+                        <input type="text" id="dns1" value="8.8.8.8" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>DNS Secondary:</label>
+                        <input type="text" id="dns2" value="8.8.4.4" class="input-field">
+                    </div>
+                    <button class="btn-primary" data-click-action="saveDNS">💾 Lưu DNS</button>
+                </div>
+
+                <!-- Connection Settings -->
+                <div class="card tool-card">
+                    <h3 class="card-title">⚙️ Cấu Hình Kết Nối</h3>
+                    <div class="form-group">
+                        <label>Max Connections:</label>
+                        <input type="number" id="max-conn" value="64" min="1" max="10000" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Timeout Connect (s):</label>
+                        <input type="number" id="timeout-connect" min="1" max="120" value="5" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Timeout Idle (s):</label>
+                        <input type="number" id="timeout-idle" min="1" max="86400" value="60" class="input-field">
+                    </div>
+                    <button class="btn-primary" data-click-action="saveConnectionSettings">💾 Lưu Cấu Hình</button>
+                </div>
+
+                <div class="card tool-card">
+                    <h3 class="card-title">Xác Nhận Prefix Nhà Mạng</h3>
+                    <div class="form-group">
+                        <label for="source-change-confirmations">Số lần quan sát prefix mới:</label>
+                        <input type="number" id="source-change-confirmations" value="2" min="1" max="10" step="1" class="input-field" aria-describedby="source-change-help">
+                    </div>
+                    <div class="form-group">
+                        <label for="source-poll-interval">Chu kỳ quan sát (giây):</label>
+                        <input type="number" id="source-poll-interval" value="5" min="2" max="300" step="1" class="input-field">
+                    </div>
+                    <p id="source-change-help" class="network-detail">Chỉ đổi pool khi prefix mới được xác minh liên tiếp. Đổi địa chỉ IPv6 gốc trong cùng prefix không buộc tạo lại pool.</p>
+                    <button class="btn-primary" id="btn-save-source-change" data-click-action="saveSourceChangeSettings">Lưu Xác Nhận Prefix</button>
+                </div>
+
+                <div class="card tool-card">
+                    <h3 class="card-title">Đổi Mật Khẩu Dashboard</h3>
+                    <div class="form-group">
+                        <label for="dashboard-current-password">Mật khẩu hiện tại:</label>
+                        <input type="password" id="dashboard-current-password" autocomplete="current-password" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label for="dashboard-new-password">Mật khẩu mới:</label>
+                        <input type="password" id="dashboard-new-password" autocomplete="new-password" class="input-field" aria-describedby="dashboard-password-help">
+                    </div>
+                    <div class="form-group">
+                        <label for="dashboard-confirm-password">Xác nhận mật khẩu mới:</label>
+                        <input type="password" id="dashboard-confirm-password" autocomplete="new-password" class="input-field">
+                    </div>
+                    <p id="dashboard-password-help" class="network-detail">Mật khẩu tùy chọn, không yêu cầu độ dài hoặc ký tự đặc biệt. Để trống mật khẩu mới và xác nhận để không yêu cầu đăng nhập dashboard. Pool và tài khoản proxy không thay đổi.</p>
+                    <p id="dashboard-password-mode" class="network-detail"></p>
+                    <button class="btn-primary" id="btn-change-dashboard-password" data-click-action="changeDashboardPassword">Đổi Mật Khẩu</button>
+                    <p id="dashboard-password-status" role="status" aria-live="polite"></p>
+                </div>
+
+                <!-- Telegram Settings -->
+                <div class="card tool-card">
+                    <h3 class="card-title">🤖 Thông Báo Telegram</h3>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 12px;">Nhận thông báo khi proxy rớt hoặc tự động khôi phục IPv6.</p>
+                    <div class="form-group">
+                        <label>Bot Token:</label>
+                        <input type="password" id="telegram-token" autocomplete="new-password" placeholder="Nhập token mới" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Chat ID:</label>
+                        <input type="text" id="telegram-chat-id" placeholder="123456789" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label for="telegram-allowed-user-ids">Telegram user IDs được điều khiển:</label>
+                        <input id="telegram-allowed-user-ids" class="input-field" placeholder="123456789, 987654321">
+                        <small>Cả user ID và chat ID đều phải khớp; không chỉ tin vào thành viên group.</small>
+                    </div>
+                    <button class="btn-primary" data-click-action="saveTelegramSettings">💾 Lưu Telegram</button>
+                    <button class="btn-outline" style="margin-left: 8px;" data-click-action="testTelegram">🧪 Test Gửi</button>
+                </div>
+
+                <!-- IPv6 Info -->
+                <div class="card tool-card">
+                    <h3 class="card-title">📡 Thông Tin IPv6</h3>
+                    <div class="info-display" id="ipv6-info">
+                        <p>Loading...</p>
+                    </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-outline" data-click-action="refreshIPv6Info">🔄 Refresh</button>
+                        <button class="btn-outline btn-danger" data-click-action="cleanupIPv6">🧹 Dọn IP Cũ</button>
+                    </div>
+                    <div class="cleanup-result" id="cleanup-result" style="display:none; margin-top:10px;"></div>
+                </div>
+
+                <!-- Quick Test -->
+                <div class="card tool-card">
+                    <h3 class="card-title">🧪 Test Proxy</h3>
+                    <div class="form-group">
+                        <label>Proxy (ip:port):</label>
+                        <input type="text" id="test-proxy" placeholder="127.0.0.1:10000" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Target URL:</label>
+                        <input type="text" id="test-url" value="http://ip-api.com/json" class="input-field">
+                    </div>
+                    <button class="btn-primary" data-click-action="testProxy">🚀 Test</button>
+                    <div class="test-result" id="test-result"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== PAGE: LOGS ===== -->
+        <section class="page" id="page-logs">
+            <div class="page-header">
+                <h2 class="page-title">NHẬT KÝ HỆ THỐNG</h2>
+                <div class="header-actions">
+                    <button class="btn-outline" data-click-action="refreshLogs">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <div class="card log-card">
+                <pre class="log-content" id="log-content">Loading logs...</pre>
+            </div>
+        </section>
+    </main>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

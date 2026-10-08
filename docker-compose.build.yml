@@ -1,0 +1,10 @@
+# Explicit local-build override; production uses docker-compose.yml only.
+services:
+  worker:
+    image: ipv6-proxy-manager:local
+    build: .
+    pull_policy: never
+  dashboard:
+    image: ipv6-proxy-manager:local
+    build: .
+    pull_policy: never

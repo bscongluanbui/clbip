@@ -1,0 +1,33 @@
+# Deployment state and credentials stay on each host.
+/secrets/
+/data/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+
+# Local audit evidence and the independently developed macOS fork.
+/audit/
+/macos_fork/
+/.agents/
+/.codex/
+
+# Python environments and test/runtime scratch files.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.test-tmp/
+.tmp*/
+.coverage
+htmlcov/
+*.log
+*.pid
+
+# Host-only operational backups and locks.
+.dashboard-port-backups/
+.dashboard-port.lock
+.clbip-rollback-image
