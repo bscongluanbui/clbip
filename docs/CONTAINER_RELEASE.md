@@ -5,11 +5,39 @@
 - Repository nguồn: <https://github.com/bscongluanbui/clbip>.
 - Compose production dùng `ghcr.io/bscongluanbui/clbip:latest`; `IPV6_MANAGER_IMAGE` trong `.env` hoặc môi trường có thể chọn tag/digest khác.
 - Worker và dashboard dùng cùng image; `APP_ROLE` xác định tiến trình từng container.
-- Workflow hiện build và acceptance image **Linux amd64** trên runner Ubuntu; không công bố bản arm64 chưa được build/test.
+- Workflow được thiết kế để tạo một manifest chung cho **`linux/amd64`, `linux/arm64`, `linux/arm/v7`**. `amd64` và `arm64` chạy trên runner native; `arm/v7` dùng QEMU trên runner amd64. Mỗi kiến trúc phải qua unit/integration/scan trước khi được ghép vào release; cấu hình workflow không tự chứng minh một tag đã publish thành công.
 - Deployment cần Docker Engine + Compose trên Linux và NIC/prefix IPv6 hoạt động. Image Docker này không phải backend native macOS của bản fork.
 - Workflow publish giữ image theo commit/tag để chọn đúng phiên bản khi update hoặc rollback. Lấy digest thật từ kết quả workflow hoặc registry; không dùng một digest ví dụ làm release đã xác minh.
 
 Để pull ẩn danh, package GHCR `clbip` phải được đặt **Public** trong package settings. Public repository không tự động chứng minh package mới cũng Public. Nếu chủ repo giữ package private, đăng nhập registry bằng credential có quyền `read:packages` trước khi pull. Hướng dẫn: [GHCR authentication và package visibility](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+### Armbian và chọn kiến trúc
+
+Một tag đa kiến trúc dùng chung cho cả ba nền tảng. Docker tự chọn manifest phù hợp khi pull; không đặt `platform: linux/amd64` trong Compose trên máy ARM. Xem [Docker multi-platform images](https://docs.docker.com/build/building/multi-platform/).
+
+| `uname -m` / hệ điều hành | Manifest |
+|---|---|
+| `x86_64`, Linux 64-bit | `linux/amd64` |
+| `aarch64`, Linux ARM 64-bit | `linux/arm64` |
+| `armv7l`, Linux ARM 32-bit | `linux/arm/v7` |
+
+Đối chiếu cả kiến trúc Docker daemon nếu kernel 64-bit nhưng userland/Docker là 32-bit:
+
+```bash
+uname -m
+docker info --format '{{.OSType}}/{{.Architecture}}'
+docker buildx imagetools inspect ghcr.io/bscongluanbui/clbip:latest
+```
+
+Lỗi `denied` xảy ra ở bước truy cập registry; nó chưa chứng minh image thiếu ARM. Kiểm tra workflow đã publish tag và package visibility trước. Sau khi có quyền pull, nếu manifest thiếu kiến trúc thì Docker thường báo `no matching manifest`. Trên package Public, có thể kiểm tra pull không dùng credential cũ bằng một Docker config tạm:
+
+```bash
+pull_config="$(mktemp -d)"
+DOCKER_CONFIG="$pull_config" docker pull ghcr.io/bscongluanbui/clbip:latest
+rm -rf "$pull_config"
+```
+
+Không ghi PAT vào `.env`, Compose hoặc repository. Nếu package Private, dùng `docker login ghcr.io --username GITHUB_ACCOUNT --password-stdin` với credential đọc package.
 
 ## Cài lần đầu
 
@@ -123,3 +151,13 @@ python3 scripts/change_dashboard_port.py 7071 --compose-file docker-compose.yml 
 ```
 
 Các lệnh isolated integration của CI chỉ kiểm tra namespace Docker riêng, không thay cho acceptance router/ISP thật. Xem [Linux acceptance](LINUX_ACCEPTANCE.md) và [build provenance](BUILD_PROVENANCE.md).
+
+## Thiết kế pipeline release đa kiến trúc
+
+1. Matrix ba kiến trúc build image local với `docker build --platform` và cùng `GITHUB_SHA`; từng job chạy unit/frontend, 3proxy trong namespace riêng và kiểm thử worker/dashboard/IPC trên chính image đó. `amd64`/`arm64` kiểm thử production engine trên runner native. `arm/v7` dùng probe riêng dưới QEMU để kiểm tra parser, authentication, source binding, listener và vòng đời binary; kiểm thử worker/dashboard và mật khẩu vẫn chạy trên image ARM đó. Probe QEMU không xác minh ownership production qua `/proc/PID/exe`, vì tiến trình host có thể hiện emulator; acceptance native ARMv7 trên thiết bị thật vẫn là bước riêng.
+2. Từng job tạo SBOM đầy đủ và báo cáo Grype JSON **không bỏ CVE chưa có bản vá**. Gate riêng chỉ chặn mức **High/Critical có bản vá được scanner ghi nhận**, theo cấu hình đã chọn; các finding chưa có bản vá vẫn hiện trong artifact để theo dõi.
+3. Chỉ image đã qua gate mới được push vào tag theo commit/kiến trúc (`sha-COMMIT-amd64`, `sha-COMMIT-arm64`, `sha-COMMIT-armv7`). Từng job kiểm tra pull/import và lưu release record gồm commit, platform, image ID và digest registry.
+4. Job publish phụ thuộc thành công của **toàn bộ matrix**. Nó tải và xác minh đủ ba record cùng commit, platform và digest, rồi dùng `docker buildx imagetools create` ghép các digest đã kiểm thử; nó không rebuild image hoặc publish `latest` thiếu một kiến trúc. Tag chung gồm `sha-COMMIT` và tag phiên bản nếu workflow chạy từ tag hợp lệ. `latest` chỉ cập nhật từ nhánh `main` hoặc tag ổn định `vMAJOR.MINOR.PATCH`; tag prerelease không thay `latest`.
+5. Manifest cuối được kiểm tra đủ ba platform và pull theo từng platform. Các job kiến trúc đã kiểm tra import/maxconn trên từng digest trước khi ghép manifest. Chỉ kết quả workflow và registry của một commit cụ thể mới là bằng chứng release, không phải các bước thiết kế trong tài liệu này.
+
+Đổi gate không đồng nghĩa báo cáo sạch mọi CVE. Evidence giữ nguyên full SBOM, full vulnerability report và kết quả gate riêng cho từng kiến trúc.

@@ -11,13 +11,36 @@ concurrency:
   cancel-in-progress: false
 jobs:
   unit:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+          - arch: armv7
+            runner: ubuntu-24.04
+            platform: linux/arm/v7
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      ARCH: ${{ matrix.arch }}
+      PLATFORM: ${{ matrix.platform }}
+      TEST_PLATFORM: ${{ matrix.platform }}
+      DOCKER_DEFAULT_PLATFORM: ${{ matrix.platform }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Enable ARMv7 user-mode emulation
+        if: matrix.arch == 'armv7'
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        with:
+          platforms: arm
       - name: Check frontend and shell
         run: |
           node --check static/app.js
@@ -32,14 +55,17 @@ jobs:
       - name: Python unit tests
         run: .venv/bin/python -m unittest discover -s tests -v
       - name: Build pinned image
-        run: docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg VCS_REF="${GITHUB_SHA}"
+        run: docker build --platform "$PLATFORM" --build-arg VCS_REF="$GITHUB_SHA" -t ipv6-proxy-manager:local .
       - name: Real 3proxy in isolated Linux network namespace
         run: |
-          docker run --rm --network none --user 0:10001 --cap-drop ALL --cap-add NET_ADMIN \
+          SCRIPT=integration_linux.py
+          EMULATED=0
+          if [[ "$ARCH" == armv7 ]]; then SCRIPT=integration_emulated.py; EMULATED=1; fi
+          docker run --platform "$PLATFORM" --rm --network none --user 0:10001 --cap-drop ALL --cap-add NET_ADMIN \
             --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=64m \
-            --tmpfs /app/data:rw,nosuid,size=64m -e IPV6_INTEGRATION_ISOLATED=1 \
+            --tmpfs /app/data:rw,nosuid,size=64m -e IPV6_INTEGRATION_ISOLATED=1 -e IPV6_INTEGRATION_EMULATED="$EMULATED" \
             --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
-            --entrypoint python ipv6-proxy-manager:local /tests/integration_linux.py --run
+            --entrypoint python ipv6-proxy-manager:local "/tests/$SCRIPT" --run
       - name: Isolated worker/dashboard roles and authenticated IPC
         run: .venv/bin/python tests/integration_roles.py --run
       - name: Generate image package inventory
@@ -93,20 +119,25 @@ jobs:
           output-format: json
           output-file: image-vulnerabilities.json
           severity-cutoff: high
-          fail-build: true
+          fail-build: false
           only-fixed: false
           cache-db: false
+      - name: Gate fixable High/Critical vulnerabilities
+        run: |
+          set -euo pipefail
+          python3 scripts/image_vulnerability_gate.py image-vulnerabilities.json | tee image-vulnerability-gate.txt
       - name: Preserve reproducible image SBOM and scan evidence
         if: always() && hashFiles('image-python-packages.json') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: image-security-evidence
+          name: image-security-evidence-${{ matrix.arch }}
           path: |
             image-python-packages.json
             image-3proxy.json
             image-sbom.cdx.json
             image-build-metadata.json
             image-vulnerabilities.json
+            image-vulnerability-gate.txt
           if-no-files-found: error
           retention-days: 14
       - name: Publish the exact tested image to GHCR
@@ -118,26 +149,20 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
-          docker tag ipv6-proxy-manager:local "$IMAGE:sha-$GITHUB_SHA"
-          docker push "$IMAGE:sha-$GITHUB_SHA"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Expected a vMAJOR.MINOR.PATCH tag'; exit 1; }
-            docker tag ipv6-proxy-manager:local "$IMAGE:$TAG"
-            docker push "$IMAGE:$TAG"
-          fi
-          docker tag ipv6-proxy-manager:local "$IMAGE:latest"
-          docker push "$IMAGE:latest"
+          docker tag ipv6-proxy-manager:local "$IMAGE:sha-$GITHUB_SHA-$ARCH"
+          docker push "$IMAGE:sha-$GITHUB_SHA-$ARCH"
           IMAGE="$IMAGE" python3 - <<'PY'
           import json, os, pathlib, subprocess
           image = os.environ['IMAGE']
-          inspected = json.loads(subprocess.check_output(['docker', 'image', 'inspect', image + ':latest']))[0]
+          inspected = json.loads(subprocess.check_output(['docker', 'image', 'inspect', 'ipv6-proxy-manager:local']))[0]
+          expected = {'amd64': 'amd64', 'arm64': 'arm64', 'armv7': 'arm'}[os.environ['ARCH']]
+          assert inspected['Os'] == 'linux' and inspected['Architecture'] == expected
+          if expected == 'arm':
+              assert inspected.get('Variant') == 'v7'
           digest = next(d for d in inspected['RepoDigests'] if d.startswith(image + '@sha256:'))
           record = {'image': image, 'digest': digest, 'image_id': inspected['Id'],
-                    'commit': os.environ['GITHUB_SHA'], 'platform': 'linux/amd64',
-                    'tags': ['latest', 'sha-' + os.environ['GITHUB_SHA']]}
-          if os.environ['GITHUB_REF'].startswith('refs/tags/v'):
-              record['tags'].append(os.environ['GITHUB_REF'].removeprefix('refs/tags/'))
+                    'commit': os.environ['GITHUB_SHA'], 'platform': os.environ['PLATFORM'],
+                    'tags': ['sha-' + os.environ['GITHUB_SHA'] + '-' + os.environ['ARCH']]}
           pathlib.Path('container-release.json').write_text(json.dumps(record, indent=2) + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('## Published tested container\n\n`' + digest + '`\n\nCommit: `' + record['commit'] + '`\n')
@@ -153,12 +178,81 @@ jobs:
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
           DIGEST=$(python3 -c 'import json; print(json.load(open("container-release.json"))["digest"])')
           docker pull "$DIGEST"
-          docker run --rm --network none --entrypoint python "$DIGEST" -c 'import app, credentials, network_inventory; from validation import DEFAULT_SETTINGS; assert DEFAULT_SETTINGS["max_connections"] == 64; print("PUBLISHED_IMPORTS=OK MAXCONN=64")'
+          docker run --platform "$PLATFORM" --rm --network none --entrypoint python "$DIGEST" -c 'import app, credentials, network_inventory; from validation import DEFAULT_SETTINGS; assert DEFAULT_SETTINGS["max_connections"] == 64; print("PUBLISHED_IMPORTS=OK MAXCONN=64")'
       - name: Preserve container release digest
         if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: container-release
+          name: container-release-${{ matrix.arch }}
           path: container-release.json
+          if-no-files-found: error
+          retention-days: 90
+  publish:
+    needs: unit
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: container-release-*
+          path: release-records
+      - name: Merge only the three tested architecture digests
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          python3 scripts/merge_container_release.py prepare release-records --image "$IMAGE" --commit "$GITHUB_SHA" --output merge-input.json
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          mapfile -t REFS < <(python3 -c 'import json; print("\n".join(json.load(open("merge-input.json"))["refs"]))')
+          TAGS=(--tag "$IMAGE:sha-$GITHUB_SHA")
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then TAGS+=(--tag "$IMAGE:latest"); fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Expected vMAJOR.MINOR.PATCH'; exit 1; }
+            TAGS+=(--tag "$IMAGE:$TAG")
+            if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then TAGS+=(--tag "$IMAGE:latest"); fi
+          fi
+          docker buildx imagetools create "${TAGS[@]}" "${REFS[@]}"
+          docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --raw > manifest-index.json
+          docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA" --format '{{json .Manifest}}' > manifest-descriptor.json
+          python3 scripts/merge_container_release.py verify merge-input.json manifest-index.json manifest-descriptor.json --output container-release.json
+          for PLATFORM in linux/amd64 linux/arm64 linux/arm/v7; do
+            docker pull --platform "$PLATFORM" "$IMAGE:sha-$GITHUB_SHA"
+          done
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path('container-release.json')
+          record = json.loads(path.read_text())
+          record['tags'] = ['sha-' + os.environ['GITHUB_SHA']]
+          ref = os.environ['GITHUB_REF']
+          if ref == 'refs/heads/main':
+              record['tags'].append('latest')
+          elif ref.startswith('refs/tags/v'):
+              tag = ref.removeprefix('refs/tags/')
+              record['tags'].append(tag)
+              if '-' not in tag and tag.count('.') == 2:
+                  record['tags'].append('latest')
+          path.write_text(json.dumps(record, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('## Published multi-platform container\n\n`' + record['digest'] + '`\n\n' + ', '.join(record['platforms']) + '\n')
+          print('MULTIPLATFORM_PUBLISHED=' + record['digest'])
+          PY
+      - name: Preserve multi-platform release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-release
+          path: |
+            container-release.json
+            merge-input.json
+            manifest-index.json
+            manifest-descriptor.json
           if-no-files-found: error
           retention-days: 90

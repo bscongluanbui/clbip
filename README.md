@@ -24,7 +24,9 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-Compose mặc định dùng **`ghcr.io/bscongluanbui/clbip:latest`**. Image được build/publish bằng GitHub Actions; lần cập nhật tiếp theo chỉ cần:
+Compose mặc định dùng **`ghcr.io/bscongluanbui/clbip:latest`**. GitHub Actions được thiết kế để build/test cả **Linux amd64, arm64 và arm/v7**, rồi ghép một tag đa kiến trúc sau khi cả ba job đạt gate. Docker chọn kiến trúc khi pull; Armbian `aarch64` dùng `linux/arm64`, không cần sửa Compose sang tag riêng. Chỉ dùng tag sau khi workflow publish thành công và package GHCR có quyền pull phù hợp; repository Public không tự làm package Public. Xem [hướng dẫn Armbian/registry](docs/CONTAINER_RELEASE.md#armbian-và-chọn-kiến-trúc).
+
+Lần cập nhật tiếp theo dùng:
 
 ```bash
 docker compose pull
@@ -105,6 +107,6 @@ docker compose logs --tail=100 worker dashboard
 
 Benchmark hỗ trợ listener HTTP và SOCKS5 (`socks5h://`, DNS qua proxy), matrix mặc định **25/50/100/200** hoặc `--counts` tùy chọn, một giới hạn concurrency chung. Report chứa source mismatch/error, p50/p95 và snapshot RSS/FD/NDP qua `/api/proxy/health` được xác thực. Matrix chỉ chọn các listener đã tồn tại; để đo capacity theo số proxy thực sự triển khai, chạy riêng từng mức và đối chiếu tổng deployed trong health. Kết quả unit test không phải số đo throughput/router thật.
 
-CI build image, tạo **SBOM toàn image** (Debian + Python + binary 3proxy có SHA256), rồi Grype scan SBOM với database được cập nhật. Actions được pin commit SHA, Syft/Grype được pin version; CVE High/Critical làm workflow fail, kể cả khi chưa có bản vá. Evidence SBOM/image ID/scan JSON được lưu thành artifact. SBOM dependency trong repository là metadata nguồn; chỉ artifact sau một lần CI build/scan thành công mới chứng minh image tương ứng đã được scan.
+CI build/test từng kiến trúc, tạo **SBOM toàn image** (Debian + Python + binary 3proxy có SHA256), rồi Grype scan SBOM với database được cập nhật. Actions được pin commit SHA, Syft/Grype được pin version. Gate chỉ chặn **High/Critical có bản vá**; full scan JSON vẫn giữ cả CVE chưa có bản vá. Evidence SBOM/image ID/scan/gate được lưu theo kiến trúc. Job manifest chỉ ghép digest của đủ ba image đã kiểm thử, không rebuild hoặc cập nhật `latest` khi một job thất bại. SBOM dependency trong repository là metadata nguồn; chỉ artifact của một CI run cụ thể mới chứng minh image tương ứng đã được scan.
 
 Nguồn kỹ thuật chính: [RFC 4861 — Neighbor Discovery](https://www.rfc-editor.org/rfc/rfc4861), [RFC 4862 — SLAAC/DAD](https://www.rfc-editor.org/rfc/rfc4862), [RFC 8201 — IPv6 PMTUD](https://www.rfc-editor.org/rfc/rfc8201), [3proxy documentation](https://3proxy.org/doc/), [Docker capabilities](https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities), [Docker host networking](https://docs.docker.com/engine/network/drivers/host/).

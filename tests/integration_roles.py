@@ -9,10 +9,24 @@ import time
 import uuid
 
 
+def container_defaults():
+    """Keep image architecture explicit for emulated acceptance runners."""
+    common = {'image': os.environ.get('TEST_IMAGE', 'ipv6-proxy-manager:local'), 'network_mode': 'none', 'read_only': True,
+              'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'init': True,
+              'tmpfs': ['/tmp:rw,noexec,nosuid,mode=1777,size=64m'], 'stop_grace_period': '45s'}
+    platform = os.environ.get('TEST_PLATFORM', '')
+    if platform:
+        if platform not in {'linux/amd64', 'linux/arm64', 'linux/arm/v7'}:
+            raise ValueError('Unsupported integration platform: ' + platform)
+        common['platform'] = platform
+    return common
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', required=True)
     parser.parse_args(argv)
+    common = container_defaults()
     root = Path(__file__).resolve().parents[1]
     fixture_root = root / 'audit' / 'fix' / 'runtime-fixtures'
     fixture = fixture_root / ('roles-' + uuid.uuid4().hex)
@@ -26,9 +40,6 @@ def main(argv=None):
         secret_paths[name] = {'file': str(path)}
     credential_directory = '/var/lib/ipv6-manager-credentials'
     password_path = credential_directory + '/admin_password'
-    common = {'image': os.environ.get('TEST_IMAGE', 'ipv6-proxy-manager:local'), 'network_mode': 'none', 'read_only': True,
-              'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'init': True,
-              'tmpfs': ['/tmp:rw,noexec,nosuid,mode=1777,size=64m'], 'stop_grace_period': '45s'}
     config = {'services': {
         'worker': {**common, 'user': '0:10001', 'cap_add': ['NET_ADMIN'],
                    'environment': {'APP_ROLE': 'worker', 'SERVICE_TOKEN_FILE': '/run/secrets/service_token',

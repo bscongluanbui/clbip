@@ -13,6 +13,14 @@ RUN curl --fail --location --proto '=https' --tlsv1.2 \
     && tar xzf /tmp/3proxy.tar.gz --strip-components=1 \
     && make -f Makefile.Linux && strip bin/3proxy
 
+# Compile Python source distributions in a disposable, target-platform stage.
+# Runtime dependency versions and accepted wheel/sdist SHA256 values remain locked.
+FROM ${BASE_IMAGE} AS python-builder
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends build-essential pkg-config libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /build/requirements.txt
+RUN pip install --no-cache-dir --require-hashes --prefix=/install -r /build/requirements.txt
+
 FROM ${BASE_IMAGE} AS runtime
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/bscongluanbui/clbip" \
@@ -30,7 +38,10 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     && chown 0:10001 /run/ipv6-manager && chmod 0770 /run/ipv6-manager
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --require-hashes -r /app/requirements.txt
+COPY --from=python-builder /install/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
+COPY --from=python-builder /install/bin/gunicorn /usr/local/bin/gunicorn
+RUN python -m pip check \
+    && python -c 'import aiohttp, flask, gunicorn, requests, telebot; print("RUNTIME_DEPENDENCIES=OK")'
 COPY --from=builder /build/bin/3proxy /usr/local/bin/3proxy
 COPY app.py ipv6_manager.py proxy_config.py state_store.py service.py rpc.py validation.py worker.py credentials.py network_inventory.py /app/
 COPY telegram_notify.py telegram_bot.py start.sh /app/
