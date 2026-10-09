@@ -540,7 +540,7 @@
             <!-- Single Proxy Test -->
             <div class="card speedtest-config-card">
                 <h3 class="card-title">🎯 Test Proxy Đơn</h3>
-                <p class="form-hint">DNS/TCP là thời gian curl kết nối tới proxy; CONNECT/TLS/TTFB/Total là mốc tích lũy. CONNECT/TLS bao gồm cả thiết lập kết nối upstream. Tốc độ đo trên phản hồi mẫu, không phải băng thông tối đa của đường truyền.</p>
+                <p class="form-hint">Địa chỉ proxy/TCP là thời gian curl phân giải và kết nối tới proxy, không phải DNS của website. CONNECT/TLS/TTFB/Total là mốc tích lũy. CONNECT/TLS bao gồm DNS đích và thiết lập kết nối upstream, không chỉ TLS. Tốc độ đo trên phản hồi mẫu, không phải băng thông tối đa của đường truyền.</p>
                 <div class="speedtest-form">
                     <div class="form-group">
                         <label>Proxy Port:</label>
@@ -568,7 +568,7 @@
                 <div class="speedtest-single-result" id="speedtest-single-result" style="display:none;">
                     <div class="speedtest-timing-grid">
                         <div class="timing-item">
-                            <span class="timing-label">DNS curl</span>
+                            <span class="timing-label">Địa chỉ proxy (curl)</span>
                             <span class="timing-value" id="st-dns">-</span>
                         </div>
                         <div class="timing-item">
@@ -603,20 +603,51 @@
                     <!-- Visual Timing Bar -->
                     <div class="timing-bar-container" id="timing-bar-container" style="display:none;">
                         <div class="timing-bar">
-                            <div class="timing-segment dns" id="bar-dns" title="DNS"></div>
+                            <div class="timing-segment dns" id="bar-dns" title="Địa chỉ proxy (curl)"></div>
                             <div class="timing-segment connect" id="bar-connect" title="Connect"></div>
                             <div class="timing-segment tls" id="bar-tls" title="CONNECT/TLS"></div>
                             <div class="timing-segment ttfb" id="bar-ttfb" title="TTFB"></div>
                             <div class="timing-segment download" id="bar-download" title="Download"></div>
                         </div>
                         <div class="timing-bar-legend">
-                            <span class="legend-item"><span class="legend-dot dns"></span>DNS</span>
+                            <span class="legend-item"><span class="legend-dot dns"></span>Địa chỉ proxy</span>
                             <span class="legend-item"><span class="legend-dot connect"></span>Connect</span>
                             <span class="legend-item"><span class="legend-dot tls"></span>CONNECT/TLS</span>
                             <span class="legend-item"><span class="legend-dot ttfb"></span>TTFB</span>
                             <span class="legend-item"><span class="legend-dot download"></span>Download</span>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- On-demand diagnostics: no background DNS probes -->
+            <div class="card" id="proxy-diagnostics-panel" aria-busy="false">
+                <h3 class="card-title">🔎 Chẩn Đoán DNS &amp; Kết Nối</h3>
+                <p class="form-hint">Dùng Target URL ở Test Proxy Đơn. Đo AAAA trực tiếp từ từng resolver khi bấm nút; phép đo không đi qua cache 3proxy và không tạo lại pool. Lịch sử chỉ gồm speedtest của dashboard, không ghi nhận tự động traffic của trình duyệt; dữ liệu nằm trong RAM và mất khi worker restart.</p>
+                <button class="btn-primary" id="btn-proxy-diagnostics" data-click-action="runProxyDiagnostics">Đo DNS &amp; Xem Chẩn Đoán</button>
+                <p id="proxy-diagnostics-status" class="network-detail" role="status" aria-live="polite" style="overflow-wrap: anywhere;"></p>
+                <div id="proxy-diagnostics-result" style="display:none;">
+                    <h4>DNS từng resolver</h4>
+                    <p id="diagnostics-dns-summary" class="network-detail" style="white-space: pre-wrap; overflow-wrap: anywhere;"></p>
+                    <div class="table-wrapper">
+                        <table class="proxy-table speedtest-table">
+                            <thead><tr><th scope="col">Resolver</th><th scope="col">Hostname</th><th scope="col">Kết quả AAAA</th><th scope="col">RCODE</th><th scope="col">Thời gian</th><th scope="col">Địa chỉ IPv6</th></tr></thead>
+                            <tbody id="diagnostics-dns-tbody"></tbody>
+                        </table>
+                    </div>
+                    <h4>Lịch sử speedtest trong phiên worker</h4>
+                    <p id="diagnostics-history-summary" class="network-detail" style="overflow-wrap: anywhere;"></p>
+                    <p id="diagnostics-history-errors" class="network-detail" style="overflow-wrap: anywhere;"></p>
+                    <div class="table-wrapper">
+                        <table class="proxy-table speedtest-table">
+                            <thead><tr><th scope="col">Port / Domain</th><th scope="col">Số mẫu</th><th scope="col">Thành công</th><th scope="col">Lỗi</th><th scope="col">P50</th><th scope="col">P95</th><th scope="col">P99</th></tr></thead>
+                            <tbody id="diagnostics-history-tbody"></tbody>
+                        </table>
+                    </div>
+                    <h4>Snapshot tài nguyên</h4>
+                    <p id="diagnostics-resource-summary" class="network-detail" style="overflow-wrap: anywhere;"></p>
+                    <p id="diagnostics-cpu-summary" class="network-detail" style="overflow-wrap: anywhere;"></p>
+                    <p id="diagnostics-network-summary" class="network-detail" style="white-space: pre-wrap; overflow-wrap: anywhere;"></p>
                 </div>
             </div>
 
@@ -658,7 +689,7 @@
                                     <th>#</th>
                                     <th>Port</th>
                                     <th>IPv6</th>
-                                    <th>DNS curl</th>
+                                    <th>Địa chỉ proxy</th>
                                     <th>TCP proxy</th>
                                     <th>TTFB</th>
                                     <th>Total</th>
@@ -744,6 +775,11 @@
                     <div class="form-group">
                         <label>Timeout Connect (s):</label>
                         <input type="number" id="timeout-connect" min="1" max="120" value="5" class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label for="timeout-dns">Timeout DNS mỗi resolver (s):</label>
+                        <input type="number" id="timeout-dns" min="1" max="30" step="1" value="15" class="input-field" aria-describedby="timeout-dns-help">
+                        <p id="timeout-dns-help" class="form-hint">Giữ mặc định 15 giây để tương thích. Có thể thử 3–5 giây sau khi đo DNS chính và dự phòng. Đổi timeout cần nạp lại engine; pool và IPv6 giữ nguyên.</p>
                     </div>
                     <div class="form-group">
                         <label>Timeout Idle (s):</label>

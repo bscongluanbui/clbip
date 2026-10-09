@@ -7,12 +7,14 @@ import unittest
 from unittest.mock import patch
 
 from service import ProxyService
+from diagnostics import DiagnosticHistory
 from validation import DEFAULT_SETTINGS
 
 
 class SpeedtestMetricsTests(unittest.TestCase):
     def setUp(self):
         self.service = ProxyService.__new__(ProxyService)
+        self.service.diagnostic_history = DiagnosticHistory(max_samples=200)
         self.proxy = {'id': 1, 'protocol': 'http', 'ipv6': '2606:4700:1::10', 'port': 10000}
         self.settings = {**DEFAULT_SETTINGS, 'auth_type': 'none', 'listener_ipv4': '0.0.0.0'}
         self.metrics = {'dns_lookup': 0.01, 'tcp_connect': 0.02, 'tls_handshake': 0.06,

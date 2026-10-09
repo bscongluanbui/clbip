@@ -79,6 +79,12 @@ def validate_config_inputs(proxies, users, settings):
     s['max_connections'] = _integer(s.get('max_connections', 64), 'max_connections', 1, 10000)
     s['timeout_connect'] = _integer(s.get('timeout_connect', 10), 'timeout_connect', 1, 300)
     s['timeout_idle'] = _integer(s.get('timeout_idle', 300), 'timeout_idle', 1, 86400)
+    # Keep the previous 15-second DNS wait when loading a pre-setting state.
+    # DNS is a typed setting; do not silently coerce strings or booleans.
+    dns_timeout = s.get('timeout_dns', 15)
+    if isinstance(dns_timeout, bool) or not isinstance(dns_timeout, int):
+        raise ValueError('timeout_dns must be an integer')
+    s['timeout_dns'] = _integer(dns_timeout, 'timeout_dns', 1, 30)
     for key, default in (('dns1', '127.0.0.1'), ('dns2', '8.8.8.8'), ('dns3', '1.1.1.1')):
         value = s.get(key, default)
         if not isinstance(value, str) or '%' in value:
@@ -173,7 +179,7 @@ def _generate_single_config(proxies, users, settings, instance_index=0, total_in
     lines += ['nscache 65536', 'nscache6 65536']
     # BYTE_SHORT BYTE_LONG STRING_SHORT STRING_LONG CONNECTION_SHORT
     # CONNECTION_LONG DNS CHAIN CONNECT CONNECTBACK (3proxy manual).
-    lines += [f"timeouts 1 5 30 60 {settings['timeout_idle']} {settings['timeout_idle']} 15 60 {settings['timeout_connect']} 5"]
+    lines += [f"timeouts 1 5 30 60 {settings['timeout_idle']} {settings['timeout_idle']} {settings['timeout_dns']} 60 {settings['timeout_connect']} 5"]
     if settings['log_enabled']:
         lines += [f'log {root}/logs/3proxy_{instance_index}.log D', 'logformat "L%t.%. %N.%p %E %U %C:%c %R:%r %O %I"', 'rotate 7']
     else:

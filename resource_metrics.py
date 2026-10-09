@@ -92,7 +92,7 @@ def _locations(proc_root, fallback_root):
         for mount_version, root, mountpoint, mount_controllers in mounts:
             if version != mount_version:
                 continue
-            relevant = {'pids', 'memory'} if version == 2 else controllers & mount_controllers & {'pids', 'memory'}
+            relevant = {'pids', 'memory', 'cpu'} if version == 2 else controllers & mount_controllers & {'pids', 'memory', 'cpu', 'cpuacct'}
             if not relevant:
                 continue
             relative = _relative(membership, root)
@@ -103,7 +103,8 @@ def _locations(proc_root, fallback_root):
             if relative is None or str(relative) == '.':
                 candidates.append(mountpoint)
             for controller in relevant:
-                filename = 'pids.current' if controller == 'pids' else ('memory.current' if version == 2 else 'memory.usage_in_bytes')
+                filename = {'pids': 'pids.current', 'memory': 'memory.current' if version == 2 else 'memory.usage_in_bytes',
+                            'cpu': 'cpu.stat', 'cpuacct': 'cpuacct.usage'}[controller]
                 for candidate in candidates:
                     if (candidate / filename).is_file():
                         found[controller] = (candidate, mountpoint, version)
@@ -113,7 +114,7 @@ def _locations(proc_root, fallback_root):
             candidates = [fallback_root / str(relative)] if relative is not None else []
             if relative is None or str(relative) == '.':
                 candidates.append(fallback_root)
-            for controller, filename in (('pids', 'pids.current'), ('memory', 'memory.current')):
+            for controller, filename in (('pids', 'pids.current'), ('memory', 'memory.current'), ('cpu', 'cpu.stat')):
                 if controller not in found:
                     for candidate in candidates:
                         if (candidate / filename).is_file():

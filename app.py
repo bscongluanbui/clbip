@@ -263,6 +263,7 @@ def create_app(config=None, client=None):
         ('/api/proxies/export', 'GET', 'export', 'query'), ('/api/logs', 'GET', 'logs', 'query'),
         ('/api/proxy/speedtest', 'POST', 'speedtest', 'body'),
         ('/api/proxy/speedtest-batch', 'POST', 'speedtest_batch', 'body'),
+        ('/api/proxy/diagnostics', 'POST', 'diagnostics', 'body'),
         ('/api/proxy/auto-optimize', 'POST', 'auto_optimize', 'body'),
          ('/api/telegram/test', 'POST', 'telegram_test', 'none'), ('/api/events', 'GET', 'events', 'none'),
         ('/api/ownership/resolve', 'POST', 'resolve_uncertain', 'body'),
@@ -312,7 +313,7 @@ def create_app(config=None, client=None):
         return handle
 
     for number, (url, http_method, method, mode) in enumerate(routes):
-        app.add_url_rule(url, f'rpc_{number}_{method}', view(method, mode, http_method != 'GET'), methods=[http_method])
+        app.add_url_rule(url, f'rpc_{number}_{method}', view(method, mode, http_method != 'GET' and method != 'diagnostics'), methods=[http_method])
     return app
 
 

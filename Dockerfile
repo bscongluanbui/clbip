@@ -44,7 +44,7 @@ RUN python -m pip check \
     && python -c 'import aiohttp, flask, gunicorn, requests, telebot; print("RUNTIME_DEPENDENCIES=OK")'
 COPY --from=builder /build/bin/3proxy /usr/local/bin/3proxy
 COPY app.py ipv6_manager.py proxy_config.py state_store.py service.py rpc.py validation.py worker.py credentials.py network_inventory.py /app/
-COPY resource_metrics.py host_control.py /app/
+COPY resource_metrics.py host_control.py diagnostics.py passive_diagnostics.py /app/
 COPY telegram_notify.py telegram_bot.py start.sh /app/
 COPY templates/ /app/templates/
 COPY static/ /app/static/

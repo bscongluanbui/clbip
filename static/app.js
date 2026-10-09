@@ -15,6 +15,7 @@ let healthPollInFlight = false;
 let generationInFlight = false;
 let statusNextPollAt = 0;
 let threadSettingsInFlight = false;
+let diagnosticsInFlight = false;
 
 // ============ INIT ============
 document.addEventListener('DOMContentLoaded', async () => {
@@ -30,7 +31,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         onInterfaceChange, generateProxies, startProxy, stopProxy, restartProxy, logout,
         exportProxies, deleteAllProxies, filterProxies, refreshProxyList,
         toggleCheckAll, closeExportModal, copyExport, downloadExport, addUser,
-        updateAuthType, onSpeedtestUrlChange, runSingleSpeedtest, runBatchSpeedtest,
+        updateAuthType, onSpeedtestUrlChange, runSingleSpeedtest, runBatchSpeedtest, runProxyDiagnostics,
         runAutoOptimize, saveDNS, saveConnectionSettings, saveThreadLimitSettings, saveStartupRecoverySettings, saveSourceChangeSettings,
         changeDashboardPassword, saveTelegramSettings,
         testTelegram, refreshIPv6Info, cleanupIPv6, testProxy, refreshLogs
@@ -216,6 +217,7 @@ async function loadSettings() {
         document.getElementById('source-change-confirmations').value = data.source_change_confirmations ?? 2;
         document.getElementById('source-poll-interval').value = data.source_poll_interval ?? 5;
         if (data.timeout_connect) document.getElementById('timeout-connect').value = data.timeout_connect;
+        document.getElementById('timeout-dns').value = Number.isSafeInteger(data.timeout_dns) && data.timeout_dns >= 1 && data.timeout_dns <= 30 ? data.timeout_dns : 15;
         if (data.timeout_idle) document.getElementById('timeout-idle').value = data.timeout_idle;
         document.getElementById('telegram-token').value = '';
         document.getElementById('telegram-token').placeholder = data.telegram_bot_token_configured ? 'Đã cấu hình; để trống để giữ nguyên' : 'Nhập token mới';
@@ -1229,10 +1231,11 @@ async function changeDashboardPassword() {
 async function saveConnectionSettings() {
     const maxConn = Number(document.getElementById('max-conn').value);
     const timeoutConnect = Number(document.getElementById('timeout-connect').value);
+    const timeoutDNS = Number(document.getElementById('timeout-dns').value);
     const timeoutIdle = Number(document.getElementById('timeout-idle').value);
 
-    if (!Number.isInteger(maxConn) || maxConn < 1 || maxConn > 10000 || !Number.isInteger(timeoutConnect) || timeoutConnect < 1 || timeoutConnect > 120 || !Number.isInteger(timeoutIdle) || timeoutIdle < 1 || timeoutIdle > 86400) {
-        showToast('Maxconn 1..10000, connect 1..120, idle 1..86400; tất cả phải là số nguyên', 'warning'); return;
+    if (!Number.isInteger(maxConn) || maxConn < 1 || maxConn > 10000 || !Number.isInteger(timeoutConnect) || timeoutConnect < 1 || timeoutConnect > 120 || !Number.isInteger(timeoutDNS) || timeoutDNS < 1 || timeoutDNS > 30 || !Number.isInteger(timeoutIdle) || timeoutIdle < 1 || timeoutIdle > 86400) {
+        showToast('Maxconn 1..10000, connect 1..120, DNS 1..30, idle 1..86400; tất cả phải là số nguyên', 'warning'); return;
     }
     try {
         await api('/api/settings', {
@@ -1240,6 +1243,7 @@ async function saveConnectionSettings() {
             body: JSON.stringify({
                 max_connections: maxConn,
                 timeout_connect: timeoutConnect,
+                timeout_dns: timeoutDNS,
                 timeout_idle: timeoutIdle
             })
         });
@@ -1421,6 +1425,90 @@ function getSpeedtestUrl() {
     return select.value;
 }
 
+function diagnosticNumber(value, suffix = '', precision = 0) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${value.toFixed(precision)}${suffix}` : '—';
+}
+
+function renderProxyDiagnostics(data) {
+    const dns = data.dns || {}, history = data.history || {}, resources = data.resources || {};
+    const dnsResults = Array.isArray(dns.results) ? dns.results.slice(0, 32) : [];
+    const dnsSummary = Array.isArray(dns.summary) ? dns.summary.slice(0, 8) : [];
+    document.getElementById('diagnostics-dns-summary').textContent = dns.available === false ?
+        `DNS chưa có kết quả: ${dns.error || dns.reason || 'resolver chưa sẵn sàng'}` :
+        dnsSummary.length ? [`AAAA trực tiếp, timeout phép đo ${diagnosticNumber(dns.timeout_seconds, ' s')} mỗi lượt (khác timeout engine); percentile chỉ gồm lượt có AAAA.`,
+            ...dnsSummary.map(row => `${row.server}: ${diagnosticNumber(row.successes)}/${diagnosticNumber(row.samples)} có AAAA · P50 ${diagnosticNumber(row.p50_ms, ' ms', 1)} · P95 ${diagnosticNumber(row.p95_ms, ' ms', 1)} · P99 ${diagnosticNumber(row.p99_ms, ' ms', 1)}`)].join('\n') :
+            'Chưa có mẫu DNS. Đây là phép đo trực tiếp resolver, không phải tỷ lệ hit cache.';
+    document.getElementById('diagnostics-dns-tbody').innerHTML = dnsResults.length ? dnsResults.map(row => {
+        const addresses = Array.isArray(row.addresses) ? row.addresses.slice(0, 16).map(String).join(', ') : '';
+        const outcome = {ok: 'Có AAAA', no_aaaa: 'Không có AAAA (phản hồi DNS hợp lệ)', nxdomain: 'NXDOMAIN: hostname không tồn tại',
+            timeout: 'Timeout resolver', dns_error: 'Lỗi DNS resolver', invalid_response: 'Phản hồi DNS không hợp lệ',
+            network_error: 'Lỗi đường mạng tới resolver', resource_unavailable: 'Thiếu tài nguyên để đo'}[row.outcome] ||
+            row.outcome || (row.success === true ? (addresses ? 'Có AAAA' : 'Không có AAAA') : 'Lỗi DNS');
+        const rcode = row.rcode_name ? `${row.rcode_name} (${row.rcode ?? '—'})` : row.rcode ?? '—';
+        return `<tr><td>${escapeHtml(row.server || '—')}</td><td>${escapeHtml(row.hostname || data.target_host || '—')}</td><td>${escapeHtml(outcome)}</td><td>${escapeHtml(rcode)}</td><td>${diagnosticNumber(row.elapsed_ms, ' ms', 1)}</td><td style="overflow-wrap: anywhere;">${escapeHtml(addresses || '—')}</td></tr>`;
+    }).join('') : '<tr><td colspan="6">Chưa có mẫu DNS.</td></tr>';
+
+    document.getElementById('diagnostics-history-summary').textContent =
+        `${diagnosticNumber(history.sample_count)} mẫu speedtest · thành công ${diagnosticNumber(history.success_count)} · lỗi ${diagnosticNumber(history.error_count)} · Tổng thời gian: P50 ${diagnosticNumber(history.p50_ms, ' ms', 1)} · P95 ${diagnosticNumber(history.p95_ms, ' ms', 1)} · P99 ${diagnosticNumber(history.p99_ms, ' ms', 1)} (mọi lượt có thời gian đo, gồm cả lỗi; nearest-rank). Chỉ speedtest dashboard, không phải traffic trình duyệt; trống nghĩa là chưa đo.`;
+    const categories = history.error_categories && typeof history.error_categories === 'object' && !Array.isArray(history.error_categories) ? Object.entries(history.error_categories).slice(0, 16) : [];
+    const categoryLabels = {proxy_connect: 'CONNECT/proxy', proxy_auth: 'Xác thực proxy', proxy_rejected: 'Proxy từ chối',
+        dns: 'DNS', timeout: 'Timeout (chưa xác định giai đoạn)', tls: 'TLS', empty_response: 'Phản hồi rỗng',
+        transport: 'Transport', target_http: 'HTTP website', invalid_response: 'Phản hồi không hợp lệ', unknown: 'Chưa phân loại'};
+    document.getElementById('diagnostics-history-errors').textContent = categories.length ?
+        `Nhóm lỗi speedtest: ${categories.map(([name, count]) => `${Object.hasOwn(categoryLabels, name) ? categoryLabels[name] : name}: ${diagnosticNumber(count)}`).join(' · ')}` : 'Chưa có thống kê nhóm lỗi speedtest.';
+    const byPort = Array.isArray(history.by_port) ? history.by_port.slice(0, 50).map(row => ({...row, label: `Port ${row.port}`})) : [];
+    const byDomain = Array.isArray(history.by_domain) ? history.by_domain.slice(0, 50).map(row => ({...row, label: `Domain ${row.domain}`})) : [];
+    document.getElementById('diagnostics-history-tbody').innerHTML = [...byPort, ...byDomain].map(row =>
+        `<tr><td style="overflow-wrap: anywhere;">${escapeHtml(row.label)}</td><td>${diagnosticNumber(row.sample_count)}</td><td>${diagnosticNumber(row.success_count)}</td><td>${diagnosticNumber(row.error_count)}</td><td>${diagnosticNumber(row.p50_ms, ' ms', 1)}</td><td>${diagnosticNumber(row.p95_ms, ' ms', 1)}</td><td>${diagnosticNumber(row.p99_ms, ' ms', 1)}</td></tr>`
+    ).join('') || '<tr><td colspan="7">Chưa có speedtest trong phiên worker này. Chạy Test Proxy Đơn hoặc Batch Test trước.</td></tr>';
+
+    const unavailable = resources.observation === 'unavailable';
+    const threads = resources.threads || {}, sockets = resources.sockets || {};
+    const observed = typeof resources.observed_at === 'number' && Number.isFinite(resources.observed_at) && resources.observed_at > 0 && resources.observed_at <= Date.now() / 1000 + 1 ?
+        `${Math.max(0, Math.floor(Date.now() / 1000 - resources.observed_at))}s trước` : 'chưa có thời điểm';
+    const cached = resources.cached === true || resources.observation === 'cached';
+    document.getElementById('diagnostics-resource-summary').textContent =
+        `Snapshot ${cached ? 'cache' : resources.observation === 'live' ? 'trực tiếp' : 'chưa quan sát'} (${observed}) · Thread ${diagnosticNumber(unavailable ? null : threads.current)}/${diagnosticNumber(unavailable ? null : threads.limit)} · ESTABLISHED ${diagnosticNumber(unavailable ? null : sockets.established)} · CLOSE_WAIT ${diagnosticNumber(unavailable ? null : sockets.close_wait)} · RAM worker ${resourceBytes(unavailable ? null : resources.memory?.current_bytes)}.`;
+    const cpu = resources.cpu || {}, cpuUnavailable = unavailable || cpu.available === false;
+    const passiveObservation = resources.passive_cached === true ? 'snapshot cache' : 'snapshot';
+    const cpuErrors = Array.isArray(cpu.errors) ? cpu.errors.filter(row => typeof row === 'string').slice(0, 4).join('; ') : '';
+    document.getElementById('diagnostics-cpu-summary').textContent =
+        `CPU worker ${passiveObservation} (100% = 1 core): ${diagnosticNumber(cpuUnavailable ? null : cpu.usage_percent_one_core, '%', 1)} · throttled +${diagnosticNumber(cpuUnavailable ? null : cpu.throttled_events_delta)} lần / ${diagnosticNumber(cpuUnavailable ? null : cpu.throttled_seconds_delta, ' s', 3)} · cửa sổ ${diagnosticNumber(cpu.sample_seconds, ' s', 1)}. Cần hai mẫu để tính chênh lệch.${cpu.counter_reset === true ? ' Counter đã reset: chờ mẫu mới.' : ''}${cpuErrors ? ' ' + cpuErrors : ''}`;
+    const network = resources.network || {}, tcp = network.tcp || {}, networkUnavailable = unavailable || network.available === false;
+    const networkErrors = Array.isArray(network.errors) ? network.errors.filter(row => typeof row === 'string').slice(0, 4).join('; ') : '';
+    const interfaces = Array.isArray(network.interfaces) ? network.interfaces.slice(0, 16) : [];
+    document.getElementById('diagnostics-network-summary').textContent = [
+        `Mạng host namespace ${passiveObservation} (không chỉ proxy) · cửa sổ ${diagnosticNumber(network.sample_seconds, ' s', 1)} · ListenOverflows +${diagnosticNumber(networkUnavailable ? null : tcp.listen_overflows_delta)} · ListenDrops +${diagnosticNumber(networkUnavailable ? null : tcp.listen_drops_delta)} · SYN retrans +${diagnosticNumber(networkUnavailable ? null : tcp.syn_retrans_delta)} · TCP retrans +${diagnosticNumber(networkUnavailable ? null : tcp.retrans_segments_delta)}. Drop NIC không phải tỷ lệ mất gói Internet.${network.counter_reset === true ? ' Counter đã reset: chờ mẫu mới.' : ''}${networkErrors ? ' ' + networkErrors : ''}`,
+        ...interfaces.map(row => `${row.interface}: link ${diagnosticNumber(row.speed_mbps, ' Mbps')} · RX ${diagnosticNumber(networkUnavailable ? null : row.rx_mbps, ' Mbps', 3)} · TX ${diagnosticNumber(networkUnavailable ? null : row.tx_mbps, ' Mbps', 3)} · lỗi RX/TX +${diagnosticNumber(networkUnavailable ? null : row.rx_errors_delta)}/+${diagnosticNumber(networkUnavailable ? null : row.tx_errors_delta)} · drop RX/TX +${diagnosticNumber(networkUnavailable ? null : row.rx_dropped_delta)}/+${diagnosticNumber(networkUnavailable ? null : row.tx_dropped_delta)}`)
+    ].join('\n');
+    document.getElementById('proxy-diagnostics-result').style.display = 'block';
+}
+
+async function runProxyDiagnostics() {
+    if (diagnosticsInFlight) return;
+    const button = document.getElementById('btn-proxy-diagnostics');
+    const panel = document.getElementById('proxy-diagnostics-panel');
+    const feedback = document.getElementById('proxy-diagnostics-status');
+    diagnosticsInFlight = true;
+    button.disabled = true;
+    button.textContent = 'Đang chẩn đoán...';
+    panel.setAttribute('aria-busy', 'true');
+    feedback.textContent = 'Đang đo AAAA từng resolver và lấy snapshot; không restart engine hoặc đổi pool...';
+    document.getElementById('proxy-diagnostics-result').style.display = 'none';
+    try {
+        const data = await api('/api/proxy/diagnostics', {method: 'POST', body: JSON.stringify({target_url: getSpeedtestUrl()})});
+        renderProxyDiagnostics(data);
+        feedback.textContent = `Đã đo ${data.target_host || 'hostname đích'}. DNS trực tiếp và lịch sử speedtest được hiển thị riêng; kết quả không chứng minh toàn bộ tài nguyên website đã tải.`;
+    } catch (error) {
+        feedback.textContent = 'Chẩn đoán thất bại: ' + error.message;
+    } finally {
+        diagnosticsInFlight = false;
+        button.disabled = false;
+        button.textContent = 'Đo DNS & Xem Chẩn Đoán';
+        panel.setAttribute('aria-busy', 'false');
+    }
+}
+
 function formatTime(seconds) {
     if (seconds === undefined || seconds === null) return '-';
     if (seconds < 0.001) return '<1ms';
@@ -1528,7 +1616,7 @@ function renderTimingBar(data) {
     document.getElementById('bar-download').style.width = `${Math.max((downloadTime / total) * 100, 0.5)}%`;
 
     // Update tooltips
-    document.getElementById('bar-dns').title = `DNS: ${formatTime(dnsTime)}`;
+    document.getElementById('bar-dns').title = `Địa chỉ proxy (curl): ${formatTime(dnsTime)}`;
     document.getElementById('bar-connect').title = `Connect: ${formatTime(connectTime)}`;
     document.getElementById('bar-tls').title = `CONNECT/TLS: ${formatTime(tlsTime)}`;
     document.getElementById('bar-ttfb').title = `TTFB: ${formatTime(ttfbTime)}`;

@@ -18,6 +18,8 @@ import proxy_config as engine
 import network_inventory
 from host_control import HostControlError
 from resource_metrics import ResourceMetricsSampler
+from passive_diagnostics import PassiveDiagnosticsSampler
+from diagnostics import DiagnosticHistory, probe_dns
 from state_store import StateStore
 from validation import (DEFAULT_SETTINGS, ValidationError, boolean, credential, generation_auth, integer, interface,
                         public_settings, settings_patch, target_url)
@@ -31,7 +33,7 @@ ALIAS_BATCH_SIZE = 16
 VERIFY_WORKERS = 8
 # Only these settings are consumed by an existing pool's rendered listeners.
 # Allocation/protocol defaults affect future generation, not current proxy rows.
-ENGINE_SETTING_FIELDS = frozenset({'dns1', 'dns2', 'dns3', 'timeout_connect', 'timeout_idle',
+ENGINE_SETTING_FIELDS = frozenset({'dns1', 'dns2', 'dns3', 'timeout_connect', 'timeout_idle', 'timeout_dns',
                                   'log_enabled', 'max_connections', 'listener_ipv4',
                                   'auth_type', 'allow_private_destinations'})
 ROTATION_SETTING_FIELDS = frozenset({'rotation_enabled', 'rotation_interval'})
@@ -52,6 +54,9 @@ class ProxyService:
             host_control = HostControlClient()
         self.host_control = host_control
         self.metrics_sampler = ResourceMetricsSampler()
+        self.passive_sampler = PassiveDiagnosticsSampler()
+        self.diagnostic_history = DiagnosticHistory(max_samples=200)
+        self.diagnostic_lock = threading.Lock()
         self.lock = threading.RLock()
         self.started_at = time.time()
         self.last_probe = 0
@@ -93,12 +98,13 @@ class ProxyService:
                    'status': self.status, 'health': self.health, 'interfaces': self.interfaces,
                    'subnets': self.subnets, 'addresses': self.addresses, 'export': self.export,
                    'logs': self.logs, 'speedtest': self.speedtest, 'speedtest_batch': self.speedtest_batch,
+                   'diagnostics': self.diagnostics,
                    'auto_optimize': self.auto_optimize, 'telegram_config': self.telegram_config,
                    'telegram_test': self.telegram_test, 'events': self.events,
                    'resolve_uncertain': self.resolve_uncertain}
         if method not in methods or not isinstance(params, dict):
             raise ValidationError('Worker method/params không hợp lệ')
-        if method in {'status', 'health', 'proxies'}:
+        if method in {'status', 'health', 'proxies', 'diagnostics'}:
             return methods[method](params)
         if method in {'settings', 'users', 'events', 'interfaces', 'addresses', 'subnets'}:
             return methods[method](params)
@@ -1003,6 +1009,9 @@ class ProxyService:
             except (AttributeError, OSError, RuntimeError, ValueError):
                 controller['error'] = 'Host PID controller observation unavailable'
         resources['host_control'] = controller
+        passive = self.passive_sampler.collect(state['settings']['interface'])
+        resources['cpu'], resources['network'] = passive['cpu'], passive['network']
+        resources['passive_cached'] = passive['cached']
         return resources
 
     @staticmethod
@@ -1076,6 +1085,7 @@ class ProxyService:
         proto = 'http' if proxy['protocol'] == 'dual' else proxy['protocol']
         url_proto = 'socks5h' if proto == 'socks5' else 'http'
         config = ''
+        result = None
         if settings['auth_type'] == 'userpass' and users:
             u = users[0]
             credential(u['username'], u['password'])
@@ -1087,6 +1097,7 @@ class ProxyService:
                '{"dns_lookup":%{time_namelookup},"tcp_connect":%{time_connect},'
                '"tls_handshake":%{time_appconnect},"total_time":%{time_total},'
                '"ttfb":%{time_starttransfer},"http_code":"%{http_code}",'
+               '"http_connect_code":%{http_connect},'
                '"speed_download":%{speed_download},"size_download":%{size_download},'
                '"remote_ip":"%{remote_ip}"}',
                '--url', url]
@@ -1116,14 +1127,61 @@ class ProxyService:
             data['proxy_peer_ip'] = data['remote_ip']
             data['remote_ip_role'] = 'proxy_peer'
             data['timing_scope'] = 'curl_via_proxy'
+            data['dns_lookup_scope'] = 'proxy_address_resolution_not_destination_dns'
+            data['tls_handshake_scope'] = 'cumulative_connect_tunnel_and_tls'
+            data['curl_exit'] = result.returncode
+            data['http_connect_code'] = int(data.get('http_connect_code', 0))
             from urllib.parse import urlsplit
             data['target_host'] = urlsplit(url).hostname
             data['transfer_rate_scope'] = 'sample_response'
             if not data['success']:
                 data['error'] = 'Proxy transport/auth/DNS/target failed'
+            self.diagnostic_history.record(data)
             return data
-        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
-            return {'success': False, 'port': proxy['port'], 'proxy_id': proxy['id'], 'error': 'Proxy probe failed'}
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError) as exc:
+            from urllib.parse import urlsplit
+            data = {'success': False, 'port': proxy['port'], 'proxy_id': proxy['id'],
+                    'target_host': urlsplit(url).hostname, 'curl_exit': getattr(result, 'returncode', None),
+                    'error_type': 'timeout' if isinstance(exc, subprocess.TimeoutExpired) else
+                                  'transport' if isinstance(exc, OSError) else 'invalid_response',
+                    'error': 'Proxy probe failed'}
+            self.diagnostic_history.record(data)
+            return data
+
+    def diagnostics(self, params):
+        """Bounded explicit DNS query; no state/config/address/engine mutation."""
+        if set(params) - {'target_url'}:
+            raise ValidationError('Diagnostic chỉ nhận target_url')
+        url = target_url(params.get('target_url', 'https://www.bing.com'), resolve=False)
+        if not self.diagnostic_lock.acquire(blocking=False):
+            raise OperationError('Diagnostic đang chạy; đợi kết quả hiện tại')
+        try:
+            state = self.store.read()
+            settings = state['settings']
+            try:
+                measured = probe_dns(url, [settings[k] for k in ('dns1', 'dns2', 'dns3')],
+                                     timeout=min(settings.get('timeout_dns', 15), 3), rounds=2)
+            except ValueError as exc:
+                raise ValidationError('Diagnostic cần hostname và địa chỉ DNS hợp lệ') from exc
+            results, summary = [], []
+            for resolver in measured['resolvers']:
+                for probe in resolver['probes']:
+                    results.append({**probe, 'server': resolver['resolver'], 'hostname': measured['domain'],
+                                    'addresses': [a['address'] for a in probe.get('answers', [])]})
+                totals = resolver['summary']
+                summary.append({**totals, 'server': resolver['resolver'],
+                                'samples': totals['sample_count'], 'successes': totals['success_count']})
+            children = self.cached_metrics.get('proxy_children')
+            return {'success': True, 'target_host': measured['domain'],
+                    'dns': {'available': True, 'query_type': 'AAAA', 'results': results, 'summary': summary,
+                            'timeout_seconds': measured['timeout_seconds'], 'rounds': measured['rounds'],
+                            'elapsed_ms': measured['elapsed_ms'], 'cache_confirmed': False},
+                    'history': self.diagnostic_history.summary(),
+                    'resources': self._resource_observation(state, children),
+                    'runtime_changed': False,
+                    'note': 'DNS probe is separate from website requests; history contains speedtests only, not browser traffic.'}
+        finally:
+            self.diagnostic_lock.release()
 
     def speedtest(self, params):
         state = self.store.read()

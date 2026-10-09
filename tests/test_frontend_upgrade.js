@@ -141,6 +141,7 @@ function fixture(responses = []) {
     const defaults = fixture([{status: 200, data: {auth_type: 'none'}}]);
     await defaults.context.loadSettings();
     assert.equal(defaults.element('max-conn').value, 64);
+    assert.equal(defaults.element('timeout-dns').value, 15);
     assert.equal(defaults.element('thread-limit').value, 4096);
     assert.equal(defaults.element('source-change-confirmations').value, 2);
     assert.equal(defaults.element('source-poll-interval').value, 5);

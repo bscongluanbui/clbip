@@ -94,7 +94,7 @@ class ContainerReleaseContractTests(unittest.TestCase):
 
     def test_thread_controller_is_host_only_and_worker_client_is_packaged(self):
         dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
-        self.assertIn('COPY resource_metrics.py host_control.py /app/', dockerfile)
+        self.assertIn('COPY resource_metrics.py host_control.py diagnostics.py passive_diagnostics.py /app/', dockerfile)
         self.assertNotIn('COPY scripts/host_controller.py', dockerfile)
         compose = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
         self.assertIn('pids_limit: ${WORKER_THREAD_LIMIT:-4096}', compose)

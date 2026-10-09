@@ -46,7 +46,7 @@ class ConfigTests(unittest.TestCase):
                 self.validate(users=users, settings=settings)
 
     def test_injection_rejected_in_every_config_field(self):
-        for key in ('dns1', 'dns2', 'dns3', 'listener_ipv4', 'timeout_connect', 'timeout_idle', 'max_connections'):
+        for key in ('dns1', 'dns2', 'dns3', 'listener_ipv4', 'timeout_connect', 'timeout_idle', 'timeout_dns', 'max_connections'):
             with self.subTest(field=key), self.assertRaises(ValueError):
                 self.validate(settings={key: '1\nallow *'})
         for key in ('username', 'password'):
@@ -84,6 +84,28 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('maxconn 23', config)
         self.assertIn('internal 127.0.0.1', config)
         self.assertNotIn('\ndaemon\n', config)
+
+    def test_dns_timeout_changes_only_seventh_timeout_slot(self):
+        for timeout in (1, 3, 5, 30):
+            with self.subTest(timeout=timeout):
+                config = pc._generate_single_config([PROXY], [USER], {
+                    **SETTINGS, 'timeout_connect': 17, 'timeout_idle': 400,
+                    'timeout_dns': timeout,
+                })
+                self.assertIn(f'timeouts 1 5 30 60 400 400 {timeout} 60 17 5', config)
+
+    def test_dns_timeout_defaults_for_old_missing_field(self):
+        canonical = self.validate()[2]
+        self.assertEqual(canonical['timeout_dns'], 15)
+        self.assertNotIn('timeout_dns', SETTINGS)
+
+    def test_invalid_dns_timeout_never_replaces_active_config(self):
+        pc.generate_config([PROXY], [USER], SETTINGS)
+        snapshot = pc.snapshot_configs()
+        for invalid in (0, 31, -1, True, False, '3', 3.0, None, '3\nnserver 127.0.0.1'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                pc.generate_config([PROXY], [USER], {**SETTINGS, 'timeout_dns': invalid})
+            self.assertEqual(pc.snapshot_configs(), snapshot)
 
     def test_dns_port_and_shared_credential_policy(self):
         password = 'A/b;c<d>(e)[f]{g}!@%=+?~-' * 8
