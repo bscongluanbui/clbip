@@ -107,7 +107,9 @@ function fixture(responses = []) {
 
     const inventory = fixture([{status: 200, data: {interfaces: ['eth0', 'wlan0'], details: [
         {device: 'eth0', name: 'Ethernet', kind: 'ethernet', active: true, ipv4: ['192.168.1.3'],
-            ipv6: [{address: '2001:db8:1::1', prefix_len: 64}], pool_capable: true},
+            ipv6: [{address: '2001:db8:1::1', prefix_len: 64}],
+            source_ipv6: [{address: '2001:db8:1::1', prefix_len: 64, origin: 'system'}],
+            managed_ipv6_count: 0, uncertain_ipv6_count: 0, pool_capable: true},
         {device: 'wlan0', name: 'Wi-Fi', kind: 'wifi', active: false, ipv4: [], ipv6: [], pool_capable: false, reason: marker}
     ]}}]);
     inventory.context.detectSubnets = () => {};
@@ -139,9 +141,133 @@ function fixture(responses = []) {
     const defaults = fixture([{status: 200, data: {auth_type: 'none'}}]);
     await defaults.context.loadSettings();
     assert.equal(defaults.element('max-conn').value, 64);
+    assert.equal(defaults.element('thread-limit').value, 4096);
     assert.equal(defaults.element('source-change-confirmations').value, 2);
     assert.equal(defaults.element('source-poll-interval').value, 5);
     console.log('PASS: maxconn64 and source-confirmation defaults load consistently');
+
+    const resources = fixture();
+    const resourceSample = {observation: 'live', observed_at: Date.now() / 1000 - 2,
+        threads: {current: 3277, limit: 4096, events_max_delta: 0},
+        worker: {fd_count: 21}, engine: {fd_count: 320, rss_bytes: 10485760},
+        sockets: {established: 47, close_wait: 1670, states: {'TIME-WAIT': 2}},
+        host_control: {available: true, effective_limit: 4096}};
+    resources.context.renderResourceStatus({metrics: {resources: resourceSample}});
+    assert.equal(resources.element('health-threads').textContent, '3277 / 4096');
+    assert.equal(resources.element('health-thread-utilization').textContent, '80.0%');
+    assert.equal(resources.element('health-thread-denied').textContent, '+0');
+    assert.equal(resources.element('health-established').textContent, 47);
+    assert.equal(resources.element('health-closewait').textContent, 1670);
+    assert.equal(resources.element('health-fds').textContent, 'Worker 21 · 3proxy 320');
+    assert.equal(resources.element('health-memory').textContent, '10.0 MiB');
+    assert.match(resources.element('resource-warning').textContent, /CẢNH BÁO.*80%/);
+    assert.match(resources.element('resource-warning').textContent, /không tự restart/);
+    assert.match(resources.element('resource-observation').textContent, /trực tiếp.*2s trước/);
+    assert.match(resources.element('thread-limit-runtime').textContent, /4096/);
+    resources.context.renderResourceStatus({metrics: {resources: {...resourceSample,
+        threads: {current: 3687, limit: 4096, events_max_delta: 0}}}});
+    assert.match(resources.element('resource-warning').textContent, /NGHIÊM TRỌNG.*90%/);
+    assert.equal(resources.element('health-threads').style.color, 'var(--danger)');
+    resources.context.renderResourceStatus({metrics: {resources: {...resourceSample,
+        threads: {current: 2, limit: 4096, events_max_delta: 3}}}});
+    assert.equal(resources.element('health-thread-denied').textContent, '+3');
+    assert.match(resources.element('resource-warning').textContent, /NGHIÊM TRỌNG/);
+    assert.equal(resources.calls.length, 0);
+    console.log('PASS: worker PID/thread pressure at 80/90 percent or new denials is text-visible with no auto mutation');
+
+    resources.context.renderResourceStatus({metrics: {resources: {observation: 'cached', cached: true,
+        observed_at: Date.now() / 1000 - 10, threads: {current: 0, limit: 4096, events_max_delta: null},
+        sockets: {established: 0, close_wait: 0}, host_control: {available: false, error: marker},
+        alerts: [{message: marker}]}}});
+    assert.equal(resources.element('health-threads').textContent, '0 / 4096');
+    assert.equal(resources.element('health-established').textContent, 0);
+    assert.equal(resources.element('health-thread-denied').textContent, 'Chưa có mẫu so sánh');
+    assert.match(resources.element('resource-observation').textContent, /cache.*10s trước/);
+    assert(resources.element('resource-warning').textContent.includes(marker));
+    assert(resources.element('thread-limit-runtime').textContent.includes(marker));
+    assert.equal(resources.element('resource-warning').innerHTML, '');
+    assert.equal(resources.element('thread-limit-runtime').innerHTML, '');
+    resources.context.renderResourceStatus({metrics: {resources: {observation: 'unavailable',
+        threads: {current: 999, limit: 4096, events_max_delta: 100}, sockets: {established: 99}}}});
+    assert.equal(resources.element('health-threads').textContent, '— / —');
+    assert.equal(resources.element('health-established').textContent, '—');
+    assert.equal(resources.element('health-closewait').textContent, '—');
+    assert.equal(resources.element('health-thread-utilization').textContent, 'Chưa quan sát');
+    assert.equal(resources.element('health-memory').textContent, 'Chưa quan sát');
+    resources.context.renderResourceStatus({metrics: {resources: {threads: {current: '20', limit: Infinity,
+        utilization_percent: marker, events_max_delta: -1}, worker: {fd_count: marker}, engine: {rss_bytes: null}}}});
+    assert.equal(resources.element('health-threads').textContent, '— / —');
+    assert.equal(resources.element('health-memory').textContent, 'Chưa quan sát');
+    assert(!resources.element('health-thread-utilization').textContent.includes(marker));
+    assert.match(resources.element('thread-limit-runtime').textContent, /Chưa có quan sát/);
+    assert.equal(resources.calls.length, 0);
+    console.log('PASS: resource nulls, unavailable/cached samples and untrusted errors never appear as zero or injected HTML');
+
+    const threadSave = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+        {status: 200, data: {success: true, changed: true, restarted: false,
+            thread_limit_applied: true, effective_thread_limit: 4096, settings: {thread_limit: 4096}}}]);
+    threadSave.element('thread-limit').value = '4096';
+    threadSave.element('max-conn').value = '9999';
+    threadSave.element('timeout-idle').value = '600';
+    await threadSave.context.saveThreadLimitSettings();
+    assert.deepEqual(threadSave.calls.map(call => call.url), ['/api/csrf', '/api/settings']);
+    assert.deepEqual(JSON.parse(threadSave.calls[1].options.body), {thread_limit: 4096});
+    assert.match(threadSave.element('thread-limit-save-status').textContent, /xác minh.*4096.*không restart/);
+    assert.equal(threadSave.element('btn-save-thread-limit').disabled, false);
+    const threadBad = fixture();
+    for (const value of ['', '255', '16385', '4096.5', marker, 'Infinity']) {
+        threadBad.element('thread-limit').value = value;
+        await threadBad.context.saveThreadLimitSettings();
+    }
+    assert.equal(threadBad.calls.length, 0);
+    assert.match(threadBad.element('thread-limit-save-status').textContent, /256\.\.16384/);
+    console.log('PASS: independent integer thread_limit patch never submits maxconn/timeouts or pool changes');
+
+    const threadUnchanged = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+        {status: 200, data: {success: true, changed: false, restarted: false, settings: {thread_limit: 4096}}}]);
+    threadUnchanged.element('thread-limit').value = '4096';
+    threadUnchanged.context.renderResourceStatus({metrics: {resources: {observation: 'live',
+        threads: {current: 1500, limit: 1829, configured_limit: 4096, requested_limit: 4096},
+        host_control: {available: true, effective_limit: 1829}}}});
+    const observedRuntime = threadUnchanged.element('thread-limit-runtime').textContent;
+    await threadUnchanged.context.saveThreadLimitSettings();
+    assert.deepEqual(threadUnchanged.calls.map(call => call.url), ['/api/csrf', '/api/settings']);
+    assert.deepEqual(JSON.parse(threadUnchanged.calls[1].options.body), {thread_limit: 4096});
+    assert.match(threadUnchanged.element('thread-limit-save-status').textContent, /không thay đổi.*4096.*trần thực tế xem telemetry/);
+    assert(!threadUnchanged.element('thread-limit-save-status').textContent.includes('Đã lưu và xác minh'));
+    assert.equal(threadUnchanged.element('health-threads').textContent, '1500 / 1829');
+    assert.equal(threadUnchanged.element('thread-limit').value, '4096');
+    assert.equal(threadUnchanged.element('thread-limit-runtime').textContent, observedRuntime);
+    assert.equal(threadUnchanged.element('btn-save-thread-limit').disabled, false);
+    assert.equal(vm.runInContext('statusNextPollAt', threadUnchanged.context), 0);
+    console.log('PASS: unchanged thread save preserves observed effective limit and schedules telemetry without claiming live application');
+
+    const threadPending = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+        {status: 200, data: {success: true, restarted: false, thread_limit_applied: false,
+            host_control: {available: false, error: marker}}}]);
+    threadPending.element('thread-limit').value = '4096';
+    await threadPending.context.saveThreadLimitSettings();
+    assert.match(threadPending.element('thread-limit-save-status').textContent, /chưa xác minh áp dụng runtime/);
+    assert(threadPending.element('thread-limit-runtime').textContent.includes(marker));
+    assert.equal(threadPending.element('thread-limit-runtime').innerHTML, '');
+    const threadFailure = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
+        {status: 409, data: {success: false, error: marker}}]);
+    threadFailure.element('thread-limit').value = '256';
+    await threadFailure.context.saveThreadLimitSettings();
+    assert(threadFailure.element('thread-limit-save-status').textContent.includes(marker));
+    assert.equal(threadFailure.element('thread-limit-save-status').innerHTML, '');
+    assert.equal(threadFailure.element('btn-save-thread-limit').disabled, false);
+    const threadOverlap = fixture();
+    let resolveThread;
+    threadOverlap.context.api = async () => await new Promise(resolve => { resolveThread = resolve; });
+    threadOverlap.element('thread-limit').value = '4096';
+    const savingThread = threadOverlap.context.saveThreadLimitSettings();
+    assert.equal(threadOverlap.element('btn-save-thread-limit').disabled, true);
+    await threadOverlap.context.saveThreadLimitSettings();
+    resolveThread({success: true, restarted: false, thread_limit_applied: true, effective_thread_limit: 4096});
+    await savingThread;
+    assert.equal(threadOverlap.element('btn-save-thread-limit').disabled, false);
+    console.log('PASS: thread save verifies actual application, surfaces host/errors as text, and blocks overlapping requests');
 
     const password = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}},
         {status: 200, data: {success: true, changed: true, requires_login: true}}]);
@@ -234,6 +360,9 @@ function fixture(responses = []) {
 
     const template = fs.readFileSync('templates/index.html', 'utf8');
     assert(template.includes('id="max-conn" value="64"'));
+    assert(template.includes('id="thread-limit" value="4096" min="256" max="16384" step="1"'));
+    assert(template.includes('id="thread-limit-save-status" class="network-detail" role="status" aria-live="polite"'));
+    assert(template.includes('id="resource-warning" class="network-detail" role="status" aria-live="polite"'));
     assert(template.includes('id="build-progress-bar" role="progressbar"'));
     assert(template.includes('id="dashboard-password-status" role="status" aria-live="polite"'));
     for (const id of ['dashboard-current-password', 'dashboard-new-password', 'dashboard-confirm-password']) {

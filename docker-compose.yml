@@ -15,6 +15,7 @@ services:
   worker:
     <<: *common
     user: "0:10001"
+    pids_limit: ${WORKER_THREAD_LIMIT:-4096}
     cap_add: [NET_ADMIN]
     environment:
       APP_ROLE: worker

@@ -113,7 +113,7 @@
                         <span class="health-icon">⚡</span>
                         <div>
                             <span class="health-value" id="health-established">-</span>
-                            <span class="health-label">Active Connections</span>
+                            <span class="health-label">ESTABLISHED · pool</span>
                         </div>
                     </div>
                     <div class="health-item">
@@ -127,7 +127,7 @@
                         <span class="health-icon">📀</span>
                         <div>
                             <span class="health-value" id="health-memory">-</span>
-                            <span class="health-label">Memory</span>
+                            <span class="health-label">RAM · 3proxy</span>
                         </div>
                     </div>
                     <div class="health-item">
@@ -137,7 +137,44 @@
                             <span class="health-label">Uptime</span>
                         </div>
                     </div>
+                    <div class="health-item">
+                        <span class="health-icon" aria-hidden="true">🧵</span>
+                        <div>
+                            <span class="health-value" id="health-threads">— / —</span>
+                            <span class="health-label">Thread worker / trần thực tế</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon" aria-hidden="true">📊</span>
+                        <div>
+                            <span class="health-value" id="health-thread-utilization">Chưa quan sát</span>
+                            <span class="health-label">Sử dụng trần thread</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon" aria-hidden="true">⚠</span>
+                        <div>
+                            <span class="health-value" id="health-thread-denied">Chưa có mẫu so sánh</span>
+                            <span class="health-label">Thread bị từ chối · delta</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon" aria-hidden="true">⏳</span>
+                        <div>
+                            <span class="health-value" id="health-closewait">—</span>
+                            <span class="health-label">CLOSE-WAIT · pool</span>
+                        </div>
+                    </div>
+                    <div class="health-item">
+                        <span class="health-icon" aria-hidden="true">📂</span>
+                        <div style="min-width: 0; overflow-wrap: anywhere;">
+                            <span class="health-value" id="health-fds">Chưa quan sát</span>
+                            <span class="health-label">File descriptors · đã mở</span>
+                        </div>
+                    </div>
                 </div>
+                <p id="resource-observation" class="network-detail">Đang đọc tài nguyên worker...</p>
+                <p id="resource-warning" class="network-detail" role="status" aria-live="polite" style="overflow-wrap: anywhere;">Chưa có quan sát trần thread.</p>
             </div>
 
             <div class="card config-card">
@@ -503,6 +540,7 @@
             <!-- Single Proxy Test -->
             <div class="card speedtest-config-card">
                 <h3 class="card-title">🎯 Test Proxy Đơn</h3>
+                <p class="form-hint">DNS/TCP là thời gian curl kết nối tới proxy; CONNECT/TLS/TTFB/Total là mốc tích lũy. CONNECT/TLS bao gồm cả thiết lập kết nối upstream. Tốc độ đo trên phản hồi mẫu, không phải băng thông tối đa của đường truyền.</p>
                 <div class="speedtest-form">
                     <div class="form-group">
                         <label>Proxy Port:</label>
@@ -530,15 +568,15 @@
                 <div class="speedtest-single-result" id="speedtest-single-result" style="display:none;">
                     <div class="speedtest-timing-grid">
                         <div class="timing-item">
-                            <span class="timing-label">DNS Lookup</span>
+                            <span class="timing-label">DNS curl</span>
                             <span class="timing-value" id="st-dns">-</span>
                         </div>
                         <div class="timing-item">
-                            <span class="timing-label">TCP Connect</span>
+                            <span class="timing-label">TCP tới proxy</span>
                             <span class="timing-value" id="st-connect">-</span>
                         </div>
                         <div class="timing-item">
-                            <span class="timing-label">TLS Handshake</span>
+                            <span class="timing-label">CONNECT/TLS qua proxy</span>
                             <span class="timing-value" id="st-tls">-</span>
                         </div>
                         <div class="timing-item">
@@ -550,7 +588,7 @@
                             <span class="timing-value" id="st-total">-</span>
                         </div>
                         <div class="timing-item">
-                            <span class="timing-label">Speed</span>
+                            <span class="timing-label">Tốc độ mẫu</span>
                             <span class="timing-value" id="st-speed">-</span>
                         </div>
                         <div class="timing-item">
@@ -558,7 +596,7 @@
                             <span class="timing-value" id="st-code">-</span>
                         </div>
                         <div class="timing-item">
-                            <span class="timing-label">Remote IP</span>
+                            <span class="timing-label">Peer proxy</span>
                             <span class="timing-value" id="st-remote-ip">-</span>
                         </div>
                     </div>
@@ -567,14 +605,14 @@
                         <div class="timing-bar">
                             <div class="timing-segment dns" id="bar-dns" title="DNS"></div>
                             <div class="timing-segment connect" id="bar-connect" title="Connect"></div>
-                            <div class="timing-segment tls" id="bar-tls" title="TLS"></div>
+                            <div class="timing-segment tls" id="bar-tls" title="CONNECT/TLS"></div>
                             <div class="timing-segment ttfb" id="bar-ttfb" title="TTFB"></div>
                             <div class="timing-segment download" id="bar-download" title="Download"></div>
                         </div>
                         <div class="timing-bar-legend">
                             <span class="legend-item"><span class="legend-dot dns"></span>DNS</span>
                             <span class="legend-item"><span class="legend-dot connect"></span>Connect</span>
-                            <span class="legend-item"><span class="legend-dot tls"></span>TLS</span>
+                            <span class="legend-item"><span class="legend-dot tls"></span>CONNECT/TLS</span>
                             <span class="legend-item"><span class="legend-dot ttfb"></span>TTFB</span>
                             <span class="legend-item"><span class="legend-dot download"></span>Download</span>
                         </div>
@@ -620,11 +658,11 @@
                                     <th>#</th>
                                     <th>Port</th>
                                     <th>IPv6</th>
-                                    <th>DNS</th>
-                                    <th>Connect</th>
+                                    <th>DNS curl</th>
+                                    <th>TCP proxy</th>
                                     <th>TTFB</th>
                                     <th>Total</th>
-                                    <th>Speed</th>
+                                    <th>Tốc độ mẫu</th>
                                     <th>Status</th>
                                 </tr>
                             </thead>
@@ -712,6 +750,18 @@
                         <input type="number" id="timeout-idle" min="1" max="86400" value="60" class="input-field">
                     </div>
                     <button class="btn-primary" data-click-action="saveConnectionSettings">💾 Lưu Cấu Hình</button>
+                </div>
+
+                <div class="card tool-card">
+                    <h3 class="card-title">Trần Thread Của Worker</h3>
+                    <div class="form-group">
+                        <label for="thread-limit">Trần thread của worker:</label>
+                        <input type="number" id="thread-limit" value="4096" min="256" max="16384" step="1" class="input-field" aria-describedby="thread-limit-help thread-limit-runtime">
+                    </div>
+                    <p id="thread-limit-help" class="network-detail">Giới hạn PID/thread của toàn worker, khác maxconn của từng port. Host helper áp dụng trực tiếp khi sẵn sàng; thao tác này không restart và không tạo lại pool. Không tự tăng giới hạn khi có cảnh báo.</p>
+                    <p id="thread-limit-runtime" class="network-detail" style="overflow-wrap: anywhere;">Chưa xác minh trạng thái host helper.</p>
+                    <button class="btn-primary" id="btn-save-thread-limit" data-click-action="saveThreadLimitSettings">Lưu Trần Thread</button>
+                    <p id="thread-limit-save-status" class="network-detail" role="status" aria-live="polite" style="overflow-wrap: anywhere;"></p>
                 </div>
 
                 <div class="card tool-card">

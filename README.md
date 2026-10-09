@@ -22,6 +22,8 @@ python3 scripts/init_secrets.py --no-dashboard-password
 docker compose config --quiet
 docker compose pull
 docker compose up -d --no-build
+# Tùy chọn: bật chỉnh trần thread trực tiếp từ dashboard trên Linux cgroup v2.
+sudo bash scripts/install_host_controller.sh "$PWD/docker-compose.yml"
 ```
 
 Compose mặc định dùng **`ghcr.io/bscongluanbui/clbip:latest`**. GitHub Actions được thiết kế để build/test cả **Linux amd64, arm64 và arm/v7**, rồi ghép một tag đa kiến trúc sau khi cả ba job đạt gate. Docker chọn kiến trúc khi pull; Armbian `aarch64` dùng `linux/arm64`, không cần sửa Compose sang tag riêng. Chỉ dùng tag sau khi workflow publish thành công và package GHCR có quyền pull phù hợp; repository Public không tự làm package Public. Xem [hướng dẫn Armbian/registry](docs/CONTAINER_RELEASE.md#armbian-và-chọn-kiến-trúc).
@@ -53,6 +55,16 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --no-buil
 
 Override có chủ đích dùng image `ipv6-proxy-manager:local` và không pull GHCR; không tự áp dụng vào deployment production.
 
+### Lưu settings và trần thread
+
+- Lưu cùng giá trị trả `changed=false`; không ghi lại config hoặc restart proxy.
+- Telegram, probe, lịch rotation, startup và các mặc định cho lần tạo tiếp theo được lưu mà không ngắt các listener hiện tại. Thay DNS, bind, auth/ACL, maxconn hoặc timeout vẫn áp dụng giao dịch engine/rollback.
+- Dashboard hiển thị thread đang dùng/trần cgroup thực tế, setting được yêu cầu, số lần chạm trần mới, ESTABLISHED/CLOSE-WAIT, FD và RAM. Snapshot tài nguyên cache 5 giây; thông tin thiếu hiện là chưa quan sát. Cảnh báo 80%/90% chỉ là cảnh báo, không tự restart hoặc tạo lại pool.
+- Setting `thread_limit` mặc định **4096**, khoảng **256..16384**. Khi host controller đã cài, nút riêng áp dụng ngay bằng Docker update, không restart engine/container. Giảm trần cần còn ít nhất 64 task dự phòng theo tải hiện tại.
+- Host controller chỉ nhận `status`, `set_limit`, rollback giới hạn cho worker cố định; chạy trên host qua systemd và Unix socket trong volume runtime sẵn có. Dashboard/container không nhận Docker socket. Giới hạn mới được lưu vào `WORKER_THREAD_LIMIT` trong `.env`; Compose dùng `${WORKER_THREAD_LIMIT:-4096}` để giữ trần qua lần recreate sau.
+- Với deployment đã có: cập nhật checkout/Compose, chạy lại installer host controller, sau đó `docker compose pull && docker compose up -d --no-build`. Pull image không tự cập nhật Compose hay script host. Installer giữ nguyên secrets, dữ liệu và container đang chạy; phần `compose up` có thể tái tạo container nên thực hiện ở thời điểm chấp nhận ngắt kết nối ngắn.
+- Kiểm tra controller: `sudo systemctl status clbip-host-controller --no-pager`. Chế độ chỉnh trần trực tiếp hiện dùng Linux cgroup v2; telemetry cũng đọc được cgroup v1. CLOSE-WAIT riêng lẻ không xác nhận leak; theo dõi vòng đời và áp lực tài nguyên trước khi thay timeout.
+
 ### Cấu hình mạng trước khi tạo proxy
 
 1. Kiểm tra `ip -6 addr`, `ip -6 route`, DNS AAAA và truy cập HTTPS IPv6 trên host.
@@ -64,6 +76,10 @@ Override có chủ đích dùng image `ipv6-proxy-manager:local` và không pull
 Để trống **cả username và mật khẩu** trên form tạo proxy sẽ tự chọn không yêu cầu tài khoản; không dùng lại account đã lưu của pool trước. Nhập một ô thì cần nhập cả hai. Chế độ IP Whitelist vẫn dùng ACL nguồn; no-auth giữ ACL đích nhưng không dùng IP whitelist. API bỏ qua cả hai trường credential vẫn giữ cấu hình xác thực hiện tại để tương thích tự phục hồi khi khởi động.
 
 **Khởi Tạo Lại Proxy Cũ** mặc định bật: tạo thành công sẽ thay pool bằng đúng số lượng mới và dọn alias cũ do tool quản lý. Bỏ chọn để chủ động thêm vào pool hiện tại. Nếu kiểm tra pool mới thất bại, transaction giữ pool cũ thay vì xóa pool đang hoạt động.
+
+Phần thông tin interface chỉ hiển thị IPv6 hệ thống đủ điều kiện làm nguồn (tối đa 3 địa chỉ) và số IPv6 do tool quản lý; không liệt kê alias pool ở mục IPv6 nguồn. Danh sách chẩn đoán toàn bộ IPv6 vẫn giữ địa chỉ hệ thống, pool và alias chờ xác minh với nhãn riêng. “Nguồn ứng viên” là quan sát cục bộ, không tự khẳng định đã có Internet.
+
+Speedtest dashboard hiển thị timing DNS/TCP/TLS/TTFB của curl qua proxy và tốc độ tải **mẫu response** bằng KiB/s + Mbps; đây không phải băng thông tối đa của đường truyền. “Peer proxy” là địa chỉ listener mà curl kết nối, không phải IP đích hay bằng chứng IPv6 đầu ra. Field API cũ `speed_kbps` giữ giá trị KiB/s; field mới `speed_bytes_per_second` và `speed_mbps` ghi đơn vị rõ ràng.
 
 Mỗi proxy có IPv6 riêng và port riêng. Dual dùng một HTTP port + một SOCKS5 port (offset mặc định `10000`), tính là **2 dịch vụ**. Giới hạn mặc định **1024 dịch vụ**; `max_connections=64` áp dụng **cho từng dịch vụ/listener**, không phải toàn instance. Validation giới hạn tổng ngân sách `số dịch vụ × max_connections` ở **65536** để tránh cấu hình vượt tài nguyên ngay từ đầu; đây không phải bảo đảm throughput hay số kết nối khả dụng trên mọi host. Outgoing proxy ép IPv6; destination chỉ IPv4 sẽ thất bại.
 

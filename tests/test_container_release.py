@@ -43,6 +43,7 @@ class ContainerReleaseContractTests(unittest.TestCase):
         unit = workflow.split('  unit:\n', 1)[1].split('\n  publish:\n', 1)[0]
         publish = unit.index('- name: Publish the exact tested image to GHCR')
         for name in ('Python unit tests', 'Real 3proxy in isolated Linux network namespace',
+                     'Real 3proxy DNS timeout and closed-client cleanup regression',
                      'Isolated worker/dashboard roles and authenticated IPC',
                      'Scan full image SBOM for vulnerabilities', 'Gate fixable High/Critical vulnerabilities'):
             self.assertLess(unit.index('- name: ' + name), publish)
@@ -90,6 +91,28 @@ class ContainerReleaseContractTests(unittest.TestCase):
     def test_publication_excludes_host_secrets_data_and_other_fork(self):
         ignored = set((ROOT / '.gitignore').read_text(encoding='utf-8').splitlines())
         self.assertTrue({'/secrets/', '/data/', '.env', '/audit/', '/macos_fork/', '__pycache__/'}.issubset(ignored))
+
+    def test_thread_controller_is_host_only_and_worker_client_is_packaged(self):
+        dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertIn('COPY resource_metrics.py host_control.py /app/', dockerfile)
+        self.assertNotIn('COPY scripts/host_controller.py', dockerfile)
+        compose = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+        self.assertIn('pids_limit: ${WORKER_THREAD_LIMIT:-4096}', compose)
+        self.assertNotIn('/var/run/docker.sock', compose)
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        self.assertIn('bash -n scripts/install_host_controller.sh', workflow)
+
+    def test_dns_timeout_regression_runs_isolated_before_publication(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        unit = workflow.split('  unit:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        name = '- name: Real 3proxy DNS timeout and closed-client cleanup regression'
+        regression = unit.split(name, 1)[1].split('- name:', 1)[0]
+        self.assertIn('--network none', regression)
+        self.assertIn('IPV6_INTEGRATION_ISOLATED=1', regression)
+        self.assertIn('integration_dns_timeout.py', regression)
+        self.assertIn('ipv6-proxy-manager:local', regression)
+        self.assertLess(unit.index(name), unit.index('- name: Publish the exact tested image to GHCR'))
+        self.assertIn('dst=/tests,readonly', regression)
 
 
 if __name__ == '__main__':

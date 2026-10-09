@@ -169,6 +169,75 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(rows[0]['pool_capable'])
         self.assertEqual(inventory.hosts(rows), ['192.168.1.3', '100.64.1.2'])
 
+    def test_one_system_source_and_100_managed_aliases_retain_raw_inventory(self):
+        managed = []
+        for number in range(100):
+            address = f'2606:4700:1::{number + 16:x}'
+            alias = copy.deepcopy(self.data[0]['addr_info'][1])
+            alias.update(local=address, prefixlen=128)
+            self.data[0]['addr_info'].append(alias)
+            managed.append({'address': address, 'interface': 'eth0', 'active': number % 2 == 0})
+        raw = copy.deepcopy(self.data)
+        row = inventory.collect(Backend(), managed)[0]
+        self.assertEqual(len(row['ipv6']), 101)
+        self.assertEqual(row['managed_ipv6_count'], 100)
+        self.assertEqual(row['uncertain_ipv6_count'], 0)
+        self.assertEqual([r['address'] for r in row['source_ipv6']], [IP])
+        self.assertEqual([r['address'] for r in row['system_ipv6']], [IP])
+        self.assertEqual(self.data, raw)
+        self.assertEqual(inventory.observed_source([row], 'eth0')['address'], IP)
+
+    def test_uncertain_canonical_ipv6_is_not_a_source_or_confirmed_owner(self):
+        second = copy.deepcopy(self.data[0]['addr_info'][1])
+        second['local'] = '2606:4700:1::2'
+        self.data[0]['addr_info'].append(second)
+        uncertain = [{'address': '2606:4700:0001:0000:0000:0000:0000:0001', 'interface': 'eth0'}]
+        row = inventory.collect(Backend(), uncertain=uncertain)[0]
+        self.assertEqual(row['ipv6'][0]['origin'], 'uncertain')
+        self.assertEqual(row['managed_ipv6_count'], 0)
+        self.assertEqual(row['uncertain_ipv6_count'], 1)
+        self.assertEqual([r['address'] for r in row['source_ipv6']], [second['local']])
+        # An observed source is safe even if this reader omits the ledger argument.
+        self.assertEqual(inventory.observed_source([row], 'eth0')['address'], second['local'])
+
+    def test_ownership_is_interface_specific_and_counts_present_unique_addresses(self):
+        self.data[2].update(flags=['UP', 'LOWER_UP'], operstate='UP',
+                            addr_info=[copy.deepcopy(self.data[0]['addr_info'][1])])
+        duplicate = copy.deepcopy(self.data[0]['addr_info'][1])
+        duplicate['prefixlen'] = 128
+        self.data[0]['addr_info'].append(duplicate)
+        managed = [{'address': IP, 'interface': 'eth0'}, {'address': IP, 'interface': 'eth0'},
+                   {'address': '2606:4700:1::dead', 'interface': 'eth0'}]
+        rows = inventory.collect(Backend(), managed)
+        self.assertEqual(len(rows[0]['ipv6']), 2)
+        self.assertEqual(rows[0]['managed_ipv6_count'], 1)
+        self.assertEqual(rows[0]['source_ipv6'], [])
+        self.assertEqual(rows[2]['managed_ipv6_count'], 0)
+        self.assertEqual([r['address'] for r in rows[2]['source_ipv6']], [IP])
+
+    def test_system_inventory_keeps_deprecated_link_local_and_down_addresses(self):
+        expired = copy.deepcopy(self.data[0]['addr_info'][1])
+        expired.update(local='2606:4700:1::2', preferred_life_time=0)
+        local = copy.deepcopy(self.data[0]['addr_info'][1])
+        local.update(local='fe80::1', scope='link')
+        self.data[0]['addr_info'].extend([expired, local])
+        row = inventory.collect(Backend())[0]
+        self.assertEqual(len(row['system_ipv6']), 3)
+        self.assertEqual([r['address'] for r in row['source_ipv6']], [IP])
+        self.data[0].update(operstate='DOWN')
+        row = inventory.collect(Backend())[0]
+        self.assertEqual(len(row['system_ipv6']), 3)
+        self.assertEqual(row['source_ipv6'], [])
+
+    def test_origin_annotations_are_recomputed_not_trusted_from_backend(self):
+        backend = Mock()
+        backend.get_interface_inventory.return_value = [{'device': 'eth0', 'active': True, 'ipv6': [{
+            'address': IP, 'interface': 'eth0', 'prefix_len': 64, 'origin': 'managed', 'ready': True}]}]
+        row = inventory.collect(backend)[0]
+        self.assertEqual(row['ipv6'][0]['origin'], 'system')
+        self.assertEqual(row['source_ipv6'][0]['address'], IP)
+        self.assertEqual(backend.get_interface_inventory.return_value[0]['ipv6'][0]['origin'], 'managed')
+
 
 class LimitsTests(unittest.TestCase):
     def test_new_settings_and_config_emit_maxconn_64(self):

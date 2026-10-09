@@ -3,7 +3,7 @@
 ## Verified upstream artifacts
 
 - Base: official `python:3.12-slim-trixie`, multi-architecture manifest digest `sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d`, resolved through Docker Hub registry API.
-- 3proxy source: [official 0.9.5 tag](https://github.com/3proxy/3proxy/tree/0.9.5); SHA256 of [codeload tarball](https://codeload.github.com/3proxy/3proxy/tar.gz/refs/tags/0.9.5) = `6f6da51d9bba93231e12acd707bb6cf86a1ab9491dc6dd0c79750cb3641541a3`. Docker build checks the downloaded bytes before extraction/compilation. Hash records observed upstream bytes; it is not a detached publisher signature.
+- 3proxy source: [official 0.9.6 tag](https://github.com/3proxy/3proxy/tree/0.9.6); SHA256 of [codeload tarball](https://codeload.github.com/3proxy/3proxy/tar.gz/refs/tags/0.9.6) = `5645111fb146faaaf260c27f0e07e510e8530a7e8a18369474cc8abbedbc9c9a`. Docker build checks the downloaded bytes before extraction/compilation. Hash records observed upstream bytes; it is not a detached publisher signature.
 - Python runtime: all direct + transitive versions/artifact SHA256 values in `requirements.txt`, sourced from official PyPI JSON APIs recorded in `dependency-provenance.json`; `pip install --require-hashes` is mandatory.
 - `sbom.cdx.json`: CycloneDX 1.5 application/Python/3proxy inventory. The image's Debian package inventory must also be generated after build; this source SBOM is not a complete final-image SBOM.
 

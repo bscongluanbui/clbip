@@ -55,6 +55,97 @@ function fixture(responses = []) {
     assert(!xss.element('proxy-tbody').innerHTML.includes('onclick='));
     console.log('PASS: stored user/proxy HTML is escaped; dynamic handlers are delegated');
 
+    const interfaceSummary = fixture();
+    const sourceAddress = {address: '2606:4700:1::1', prefix_len: 64, origin: 'system'};
+    const aliases = Array.from({length: 100}, (_, index) => ({
+        address: '2606:4700:1::' + (index + 16).toString(16), prefix_len: 128, origin: 'managed'
+    }));
+    const sourceRow = {device: 'eth0', name: 'eth0', kind: 'Ethernet', active: true,
+        ipv4: ['192.168.1.3'], ipv6: [sourceAddress, ...aliases], source_ipv6: [sourceAddress],
+        managed_ipv6_count: 100, uncertain_ipv6_count: 0, pool_capable: true};
+    vm.runInContext(`interfaceInventory = ${JSON.stringify([sourceRow])};`, interfaceSummary.context);
+    interfaceSummary.context.renderInterfaceDetail('eth0');
+    const summary = interfaceSummary.element('interface-detail').textContent;
+    assert(summary.includes('IPv6 nguồn ứng viên: 2606:4700:1::1/64'));
+    assert(summary.includes('Pool do tool quản lý: 100 IPv6'));
+    assert(!summary.includes('/128'));
+    assert(!summary.includes('IPv6 quan sát:'));
+    assert(summary.length < 500);
+    assert.equal(interfaceSummary.calls.length, 0);
+    console.log('PASS: one real source + 100 pool aliases render only source and managed count');
+
+    const legacySummary = fixture();
+    const legacyRow = {...sourceRow};
+    delete legacyRow.source_ipv6;
+    delete legacyRow.managed_ipv6_count;
+    delete legacyRow.uncertain_ipv6_count;
+    vm.runInContext(`interfaceInventory = ${JSON.stringify([legacyRow])};`, legacySummary.context);
+    legacySummary.context.renderInterfaceDetail('eth0');
+    const legacyText = legacySummary.element('interface-detail').textContent;
+    assert(legacyText.includes('Đang chờ worker phân loại IPv6 nguồn/pool'));
+    assert(legacyText.includes('Số IPv6 pool: chưa có dữ liệu phân loại'));
+    assert(!legacyText.includes('Pool do tool quản lý: 0 IPv6'));
+    assert(!legacyText.includes('/128'));
+    assert(!legacyText.includes('Chưa có IPv6 nguồn đủ điều kiện'));
+    console.log('PASS: legacy unclassified worker response reports unknown instead of zero pool or no source');
+
+    const pendingSummary = fixture();
+    const pendingRow = {...sourceRow, source_ipv6: [sourceAddress, aliases[0], {
+        address: '2606:4700:1::dead', prefix_len: 64, origin: 'uncertain'}], uncertain_ipv6_count: 2};
+    vm.runInContext(`interfaceInventory = ${JSON.stringify([pendingRow])};`, pendingSummary.context);
+    pendingSummary.context.renderInterfaceDetail('eth0');
+    assert(pendingSummary.element('interface-detail').textContent.includes('Chờ xác minh quyền quản lý: 2 IPv6'));
+    assert(!pendingSummary.element('interface-detail').textContent.includes('::dead'));
+    assert(!pendingSummary.element('interface-detail').textContent.includes('/128'));
+    console.log('PASS: uncertain and managed origins never render as base candidates');
+
+    const emptySummary = fixture();
+    vm.runInContext(`interfaceInventory = ${JSON.stringify([{...sourceRow, source_ipv6: [], pool_capable: false}])};`, emptySummary.context);
+    emptySummary.context.renderInterfaceDetail('eth0');
+    assert(emptySummary.element('interface-detail').textContent.includes('Chưa có IPv6 nguồn đủ điều kiện'));
+    assert(emptySummary.element('interface-detail').textContent.includes('Pool do tool quản lý: 100 IPv6'));
+    assert(!emptySummary.element('interface-detail').textContent.includes('2606:4700:1::'));
+    console.log('PASS: an alias-only interface does not manufacture a system/base IPv6');
+
+    const boundedSummary = fixture();
+    const manySources = Array.from({length: 6}, (_, index) => ({
+        address: '2606:4700:2::' + (index + 1), prefix_len: 64, origin: 'system'}));
+    vm.runInContext(`interfaceInventory = ${JSON.stringify([{...sourceRow, source_ipv6: manySources}])};`, boundedSummary.context);
+    boundedSummary.context.renderInterfaceDetail('eth0');
+    assert(boundedSummary.element('interface-detail').textContent.includes('(+3 IPv6 hệ thống khác)'));
+    assert(boundedSummary.element('interface-detail').textContent.includes('2606:4700:2::3/64'));
+    assert(!boundedSummary.element('interface-detail').textContent.includes('2606:4700:2::4/64'));
+    boundedSummary.context.renderInterfaceDetail('missing-interface');
+    assert.equal(boundedSummary.element('interface-detail').textContent, '');
+    console.log('PASS: multi-source summary is bounded and changing to absent interface clears it');
+
+    const fullInventory = fixture([{status: 200, data: {addresses: [
+        {...sourceAddress, interface: 'eth0', scope: 'global'},
+        {...aliases[0], interface: 'eth0', scope: 'global'},
+        {address: marker, interface: 'eth0', scope: 'global', origin: 'uncertain'}
+    ]}}]);
+    await fullInventory.context.refreshIPv6Info();
+    const diagnostic = fullInventory.element('ipv6-info').innerHTML;
+    assert(diagnostic.includes('không phải danh sách IPv6 gốc'));
+    assert(diagnostic.includes('pool do tool quản lý'));
+    assert(diagnostic.includes('chờ xác minh quyền quản lý'));
+    assert(diagnostic.includes('IPv6 hệ thống'));
+    assert(diagnostic.includes('2606:4700:1::10'));
+    assert(!diagnostic.includes(marker));
+    assert.equal(fullInventory.calls.length, 1);
+    assert.equal(fullInventory.calls[0].options.method || 'GET', 'GET');
+    console.log('PASS: diagnostic inventory retains aliases with origin labels and escaped HTML');
+
+    assert.equal(xss.context.formatTransferRate({speed_kbps: 1024, speed_mbps: 8.389}), '1024 KiB/s (8.389 Mbps)');
+    assert.equal(xss.context.formatTransferRate({speed_kbps: 1024}), '1024 KiB/s (8.389 Mbps)');
+    assert.equal(xss.context.formatTransferRate({speed_kbps: 0, speed_mbps: 0}), '0 KiB/s (0.000 Mbps)');
+    assert(!xss.context.formatTransferRate({speed_kbps: 'not-number'}).includes('NaN'));
+    const speedTemplate = fs.readFileSync('templates/index.html', 'utf8');
+    assert(speedTemplate.includes('Peer proxy'));
+    assert(speedTemplate.includes('không phải băng thông tối đa của đường truyền'));
+    assert(!speedTemplate.includes('Remote IP'));
+    console.log('PASS: sample transfer rate uses KiB/s + Mbps, and peer is not mislabeled remote target');
+
     const csrf = fixture([{status: 200, data: {csrf_token: 'fixture-csrf'}}, {status: 400, data: {success: false, error: 'invalid fixture'}}]);
     await assert.rejects(() => csrf.context.api('/api/settings', {method: 'POST', body: '{}'}), /invalid fixture/);
     assert.equal(csrf.calls[1].options.headers['X-CSRF-Token'], 'fixture-csrf');

@@ -288,18 +288,18 @@
     {
       "type": "application",
       "name": "3proxy",
-      "version": "0.9.5",
-      "purl": "pkg:github/3proxy/3proxy@0.9.5",
+      "version": "0.9.6",
+      "purl": "pkg:github/3proxy/3proxy@0.9.6",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "6f6da51d9bba93231e12acd707bb6cf86a1ab9491dc6dd0c79750cb3641541a3"
+          "content": "5645111fb146faaaf260c27f0e07e510e8530a7e8a18369474cc8abbedbc9c9a"
         }
       ],
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://codeload.github.com/3proxy/3proxy/tar.gz/refs/tags/0.9.5"
+          "url": "https://codeload.github.com/3proxy/3proxy/tar.gz/refs/tags/0.9.6"
         }
       ]
     }

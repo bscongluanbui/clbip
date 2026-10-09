@@ -135,10 +135,18 @@ class BenchmarkMatrixTests(unittest.TestCase):
 
     def test_matrix_selects_all_listeners_every_round_and_redacts_credentials(self):
         proxies = bench.validate_proxies(proxy_records(200))
-        with patch.object(bench, 'sample', side_effect=self.matching) as sample:
+        observed = []
+        observed_lock = threading.Lock()
+        def sampled(url, target):
+            # Mock.call_count increments race between concurrent workers; count
+            # actual side-effect invocations under a lock instead.
+            with observed_lock:
+                observed.append(url)
+            return self.matching(url, target)
+        with patch.object(bench, 'sample', side_effect=sampled):
             report = bench.run_matrix(proxies, 'https://api64.ipify.org', [25, 50, 100, 200], rounds=2)
         self.assertTrue(report['ok'])
-        self.assertEqual(sample.call_count, (25 + 50 + 100 + 200) * 2)
+        self.assertEqual(len(observed), (25 + 50 + 100 + 200) * 2)
         self.assertEqual([x['sample_count'] for x in report['stages']], [50, 100, 200, 400])
         self.assertNotIn('PASSWORD', json.dumps(report))
         self.assertFalse(report['metrics_complete'])

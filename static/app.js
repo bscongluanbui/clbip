@@ -14,6 +14,7 @@ let statusPollInFlight = false;
 let healthPollInFlight = false;
 let generationInFlight = false;
 let statusNextPollAt = 0;
+let threadSettingsInFlight = false;
 
 // ============ INIT ============
 document.addEventListener('DOMContentLoaded', async () => {
@@ -30,7 +31,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         exportProxies, deleteAllProxies, filterProxies, refreshProxyList,
         toggleCheckAll, closeExportModal, copyExport, downloadExport, addUser,
         updateAuthType, onSpeedtestUrlChange, runSingleSpeedtest, runBatchSpeedtest,
-        runAutoOptimize, saveDNS, saveConnectionSettings, saveStartupRecoverySettings, saveSourceChangeSettings,
+        runAutoOptimize, saveDNS, saveConnectionSettings, saveThreadLimitSettings, saveStartupRecoverySettings, saveSourceChangeSettings,
         changeDashboardPassword, saveTelegramSettings,
         testTelegram, refreshIPv6Info, cleanupIPv6, testProxy, refreshLogs
     };
@@ -211,6 +212,7 @@ async function loadSettings() {
         if (data.dns1) document.getElementById('dns1').value = data.dns1;
         if (data.dns2) document.getElementById('dns2').value = data.dns2;
         document.getElementById('max-conn').value = data.max_connections ?? 64;
+        document.getElementById('thread-limit').value = Number.isSafeInteger(data.thread_limit) && data.thread_limit >= 256 && data.thread_limit <= 16384 ? data.thread_limit : 4096;
         document.getElementById('source-change-confirmations').value = data.source_change_confirmations ?? 2;
         document.getElementById('source-poll-interval').value = data.source_poll_interval ?? 5;
         if (data.timeout_connect) document.getElementById('timeout-connect').value = data.timeout_connect;
@@ -276,12 +278,19 @@ function renderInterfaceDetail(name) {
     if (!element) return;
     const row = interfaceInventory.find(item => item.device === name || item.name === name);
     if (!row) { element.textContent = ''; return; }
-    const ipv6 = (Array.isArray(row.ipv6) ? row.ipv6 : []).map(item =>
+    // Raw ipv6 is a full diagnostic inventory, including all generated aliases.
+    // Only backend-classified system source candidates belong in this summary.
+    const classified = Array.isArray(row.source_ipv6);
+    const ipv6 = (classified ? row.source_ipv6 : []).filter(item =>
+        item && item.origin === 'system').map(item =>
         typeof item === 'string' ? item : `${item.address || ''}${Number.isInteger(item.prefix_len) ? '/' + item.prefix_len : ''}`);
+    const sourceSummary = ipv6.slice(0, 3).join(', ') + (ipv6.length > 3 ? ` (+${ipv6.length - 3} IPv6 hệ thống khác)` : '');
     element.textContent = [`${row.name || row.device} (${row.kind || 'network'}) — ${row.active ? 'đang kết nối' : 'chưa kết nối'}`,
         row.ipv4?.length ? `IPv4: ${row.ipv4.join(', ')}` : 'Chưa có IPv4',
-        ipv6.length ? `IPv6 quan sát: ${ipv6.join(', ')}` : 'Chưa có IPv6',
-        row.pool_capable ? 'Có IPv6 ứng viên; tool vẫn xác minh DAD và Internet trước khi dùng.' : (row.reason || 'Chưa có IPv6 ứng viên cho pool')].join(' | ');
+        ipv6.length ? `IPv6 nguồn ứng viên: ${sourceSummary}` : classified ? 'Chưa có IPv6 nguồn đủ điều kiện' : 'Đang chờ worker phân loại IPv6 nguồn/pool',
+        Number.isInteger(row.managed_ipv6_count) ? `Pool do tool quản lý: ${row.managed_ipv6_count} IPv6` : 'Số IPv6 pool: chưa có dữ liệu phân loại',
+        row.uncertain_ipv6_count > 0 ? `Chờ xác minh quyền quản lý: ${row.uncertain_ipv6_count} IPv6` : '',
+        row.pool_capable ? 'Có IPv6 ứng viên; tool vẫn xác minh DAD và Internet trước khi dùng.' : (row.reason || 'Chưa có IPv6 ứng viên cho pool')].filter(Boolean).join(' | ');
 }
 
 async function detectSubnets(iface) {
@@ -353,6 +362,7 @@ async function refreshStatus(includeHealth = true) {
         renderBuildProgress(data);
         renderNetworkStatus(data);
         renderDashboardHosts(data);
+        renderResourceStatus(data);
         await syncCompletedStartupRecovery(data);
 
         const desiredState = document.getElementById('desired-state');
@@ -364,6 +374,7 @@ async function refreshStatus(includeHealth = true) {
     } catch (e) {
         // Silent fail for status polling
         statusNextPollAt = Date.now() + 10000;
+        renderResourceStatus({});
     } finally {
         statusPollInFlight = false;
     }
@@ -404,6 +415,71 @@ function renderProcessStatus(data) {
     runBadge.style.color = ready ? 'var(--success)' : 'var(--danger)';
 }
 
+function resourceInteger(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function resourceBytes(value) {
+    const bytes = resourceInteger(value);
+    return bytes === null ? 'Chưa quan sát' : `${(bytes / 1048576).toFixed(1)} MiB`;
+}
+
+function renderHostControl(control) {
+    const element = document.getElementById('thread-limit-runtime');
+    if (!element) return;
+    const limit = resourceInteger(control?.effective_limit);
+    const suffix = typeof control?.error === 'string' && control.error ? ` | ${control.error}` : '';
+    element.textContent = control?.available === true ?
+        `Host helper sẵn sàng; trần runtime quan sát: ${limit === null ? 'chưa xác minh' : limit}.${suffix}` :
+        control?.available === false ? `Host helper chưa sẵn sàng; chưa xác minh áp dụng trần runtime.${suffix}` :
+        'Chưa có quan sát host helper; giá trị lưu không chứng minh trần runtime đã được áp dụng.';
+}
+
+function renderResourceStatus(data) {
+    const resources = data.metrics?.resources || {};
+    const threads = resources.threads || {}, sockets = resources.sockets || {};
+    const worker = resources.worker || {}, engine = resources.engine || data.metrics?.proxy_children || {};
+    const unavailable = resources.observation === 'unavailable';
+    const current = unavailable ? null : resourceInteger(threads.current);
+    const limit = unavailable ? null : resourceInteger(threads.limit);
+    const denied = unavailable ? null : resourceInteger(threads.events_max_delta);
+    const percent = current !== null && limit !== null && limit > 0 ? current * 100 / limit : null;
+    const put = (id, text) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = text;
+        return element;
+    };
+    const threadValue = put('health-threads', `${current ?? '—'} / ${limit ?? '—'}`);
+    const level = denied !== null && denied > 0 || percent !== null && percent >= 90 ? 'critical' :
+        percent !== null && percent >= 80 ? 'warning' : percent === null ? 'unavailable' : 'ok';
+    if (threadValue) threadValue.style.color = level === 'critical' ? 'var(--danger)' :
+        level === 'warning' || level === 'unavailable' ? 'var(--warning)' : 'var(--success)';
+    put('health-thread-utilization', percent === null ? 'Chưa quan sát' : `${percent.toFixed(1)}%`);
+    put('health-thread-denied', denied === null ? 'Chưa có mẫu so sánh' : `+${denied}`);
+    put('health-closewait', unavailable ? '—' : resourceInteger(sockets.close_wait) ?? '—');
+    put('health-established', unavailable ? '—' : resourceInteger(sockets.established) ?? '—');
+    put('health-timewait', unavailable ? '—' : resourceInteger(sockets.states?.['TIME-WAIT']) ?? '—');
+    put('health-fds', unavailable ? 'Chưa quan sát' :
+        `Worker ${resourceInteger(worker.fd_count) ?? '—'} · 3proxy ${resourceInteger(engine.fd_count) ?? '—'}`);
+    put('health-memory', unavailable ? 'Chưa quan sát' : resourceBytes(engine.rss_bytes));
+    const observed = resources.observed_at;
+    const knownTime = typeof observed === 'number' && Number.isFinite(observed) && observed > 0 && observed <= Date.now() / 1000 + 1;
+    const age = knownTime ? `${Math.max(0, Math.floor(Date.now() / 1000 - observed))}s trước` : 'chưa có thời điểm quan sát';
+    put('resource-observation', `Tài nguyên worker: ${resources.cached === true || resources.observation === 'cached' ? 'snapshot cache' : resources.observation === 'live' ? 'snapshot trực tiếp' : 'chưa quan sát'} (${age}). RAM toàn worker: ${unavailable ? 'Chưa quan sát' : resourceBytes(resources.memory?.current_bytes)}. Socket chỉ thuộc port của pool.`);
+    const warnings = [];
+    if (level === 'critical') warnings.push('NGHIÊM TRỌNG: thread đạt từ 90% trần hoặc có lần cấp thread bị từ chối; kết nối mới có thể phải chờ.');
+    else if (level === 'warning') warnings.push('CẢNH BÁO: thread đạt từ 80% trần; theo dõi trước khi mở thêm profile.');
+    else if (level === 'unavailable') warnings.push('Chưa đủ số liệu để xác minh mức sử dụng và trần thread.');
+    else warnings.push('Thread dưới ngưỡng cảnh báo 80% tại snapshot này.');
+    for (const alert of Array.isArray(resources.alerts) ? resources.alerts : []) {
+        if (typeof alert?.message === 'string' && alert.message) warnings.push(alert.message);
+    }
+    warnings.push('Chỉ cảnh báo; dashboard không tự restart hoặc đổi pool.');
+    const warning = put('resource-warning', [...new Set(warnings)].join(' '));
+    if (warning) warning.style.color = level === 'critical' ? 'var(--danger)' : level === 'ok' ? '' : 'var(--warning)';
+    renderHostControl(resources.host_control);
+}
+
 async function refreshHealth() {
     if (healthPollInFlight) return;
     healthPollInFlight = true;
@@ -425,14 +501,15 @@ async function refreshHealth() {
         const memEl = document.getElementById('health-memory');
         const upEl = document.getElementById('health-uptime');
         
-        if (estEl) estEl.textContent = health.tcp?.established ?? '-';
+        if (health.metrics?.resources) renderResourceStatus(health);
+        else if (estEl) estEl.textContent = health.tcp?.established ?? '-';
         if (twEl) {
-            const tw = health.tcp?.time_wait ?? 0;
-            twEl.textContent = tw;
-            twEl.style.color = tw > 5000 ? 'var(--danger)' : tw > 1000 ? 'var(--warning)' : 'var(--success)';
+            const tw = health.metrics?.resources ? resourceInteger(health.metrics.resources.sockets?.states?.['TIME_WAIT'] ?? health.metrics.resources.sockets?.states?.['TIME-WAIT']) : resourceInteger(health.tcp?.time_wait);
+            twEl.textContent = tw ?? '—';
+            twEl.style.color = tw === null ? '' : tw > 5000 ? 'var(--danger)' : tw > 1000 ? 'var(--warning)' : 'var(--success)';
         }
         
-        if (memEl && health.instances_running) {
+        if (memEl && !health.metrics?.resources && health.instances_running) {
             const totalMem = health.instances_running.reduce((sum, inst) => sum + (inst.memory_kb || 0), 0);
             memEl.textContent = totalMem > 1024 ? `${(totalMem / 1024).toFixed(1)} MB` : `${totalMem} KB`;
         }
@@ -1172,6 +1249,45 @@ async function saveConnectionSettings() {
     }
 }
 
+async function saveThreadLimitSettings() {
+    if (threadSettingsInFlight) return;
+    const input = document.getElementById('thread-limit');
+    const feedback = document.getElementById('thread-limit-save-status');
+    const button = document.getElementById('btn-save-thread-limit');
+    const limit = Number(input.value);
+    if (!Number.isSafeInteger(limit) || limit < 256 || limit > 16384) {
+        feedback.textContent = 'Trần thread phải là số nguyên trong khoảng 256..16384.';
+        return;
+    }
+    threadSettingsInFlight = true;
+    button.disabled = true;
+    feedback.textContent = 'Đang lưu trần thread và xác minh host helper...';
+    try {
+        // This independent patch must not submit maxconn/timeouts or restart settings.
+        const result = await api('/api/settings', {method: 'POST', body: JSON.stringify({thread_limit: limit})});
+        if (result.success === false) throw new Error(result.error || 'Lưu trần thread thất bại');
+        currentSettings = {...currentSettings, ...(result.settings || {}), thread_limit: limit};
+        if (result.changed === false) {
+            // A no-op confirms saved settings, not the currently effective cgroup limit.
+            feedback.textContent = `Cấu hình không thay đổi (${limit} thread đã lưu); trần thực tế xem telemetry phía trên.`;
+            statusNextPollAt = 0;
+            return;
+        }
+        const control = result.resources?.host_control || result.metrics?.resources?.host_control || result.host_control ||
+            (result.thread_limit_applied === true ? {available: true, effective_limit: result.effective_thread_limit} : null);
+        renderHostControl(control);
+        feedback.textContent = result.thread_limit_applied === true && resourceInteger(result.effective_thread_limit) === limit && result.restarted === false ?
+            `Đã lưu và xác minh trần runtime ${limit} thread; pool giữ nguyên, không restart.` :
+            `Đã lưu trần ${limit} thread; chưa xác minh áp dụng runtime. Xem trạng thái host helper phía trên.`;
+        statusNextPollAt = 0;
+    } catch (error) {
+        feedback.textContent = 'Lưu trần thread thất bại: ' + error.message;
+    } finally {
+        threadSettingsInFlight = false;
+        button.disabled = false;
+    }
+}
+
 async function saveTelegramSettings() {
     const token = document.getElementById('telegram-token').value.trim();
     const chatId = document.getElementById('telegram-chat-id').value.trim();
@@ -1214,9 +1330,9 @@ async function refreshIPv6Info() {
 
         if (data.addresses && data.addresses.length > 0) {
             const lines = data.addresses.map(a =>
-                `${a.address} (${a.interface}, scope: ${a.scope})`
+                `${a.address} (${a.interface}, scope: ${a.scope}; ${a.origin === 'managed' ? 'pool do tool quản lý' : a.origin === 'uncertain' ? 'chờ xác minh quyền quản lý' : a.origin === 'system' ? 'IPv6 hệ thống' : 'chưa có dữ liệu phân loại'})`
             );
-            infoEl.innerHTML = `<p><strong>IPv6 trên ${escapeHtml(iface)}:</strong></p>` +
+            infoEl.innerHTML = `<p><strong>Toàn bộ IPv6 trên ${escapeHtml(iface)} (bao gồm pool; không phải danh sách IPv6 gốc):</strong></p>` +
                 lines.map(l => `<p style="margin-left:8px; color: var(--accent-secondary);">• ${escapeHtml(l)}</p>`).join('');
         } else {
             infoEl.innerHTML = '<p style="color: var(--text-muted);">Không tìm thấy IPv6 address</p>';
@@ -1349,9 +1465,9 @@ async function runSingleSpeedtest() {
             document.getElementById('st-tls').textContent = formatTime(data.tls_handshake);
             document.getElementById('st-ttfb').textContent = formatTime(data.ttfb);
             document.getElementById('st-total').textContent = formatTime(data.total_time);
-            document.getElementById('st-speed').textContent = `${data.speed_kbps || 0} KB/s`;
+            document.getElementById('st-speed').textContent = formatTransferRate(data);
             document.getElementById('st-code').textContent = data.http_code || '-';
-            document.getElementById('st-remote-ip').textContent = data.remote_ip || '-';
+            document.getElementById('st-remote-ip').textContent = data.proxy_peer_ip || data.remote_ip || '-';
 
             // Color code based on speed
             const rating = getSpeedRating(data.total_time);
@@ -1383,6 +1499,12 @@ async function runSingleSpeedtest() {
     btn.innerHTML = '🚀 Test Proxy';
 }
 
+function formatTransferRate(data) {
+    const kib = Number(data.speed_kbps || 0);
+    const mbps = Number(data.speed_mbps ?? (kib * 1024 * 8 / 1000000));
+    return `${Number.isFinite(kib) ? kib : 0} KiB/s (${Number.isFinite(mbps) ? mbps.toFixed(3) : '0.000'} Mbps)`;
+}
+
 function renderTimingBar(data) {
     const container = document.getElementById('timing-bar-container');
     if (!data.total_time || data.total_time <= 0) {
@@ -1408,7 +1530,7 @@ function renderTimingBar(data) {
     // Update tooltips
     document.getElementById('bar-dns').title = `DNS: ${formatTime(dnsTime)}`;
     document.getElementById('bar-connect').title = `Connect: ${formatTime(connectTime)}`;
-    document.getElementById('bar-tls').title = `TLS: ${formatTime(tlsTime)}`;
+    document.getElementById('bar-tls').title = `CONNECT/TLS: ${formatTime(tlsTime)}`;
     document.getElementById('bar-ttfb').title = `TTFB: ${formatTime(ttfbTime)}`;
     document.getElementById('bar-download').title = `Download: ${formatTime(downloadTime)}`;
 }
@@ -1474,7 +1596,7 @@ async function runBatchSpeedtest() {
                         <td>${r.success ? formatTime(r.tcp_connect) : '-'}</td>
                         <td>${r.success ? formatTime(r.ttfb) : '-'}</td>
                         <td class="${rating.class}">${r.success ? formatTime(r.total_time) : '-'}</td>
-                        <td>${r.success ? escapeHtml(r.speed_kbps || 0) + ' KB/s' : '-'}</td>
+                        <td>${r.success ? escapeHtml(formatTransferRate(r)) : '-'}</td>
                         <td><span class="badge badge-${r.success ? 'active' : 'inactive'}">${rating.text}</span></td>
                     </tr>
                 `;

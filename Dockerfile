@@ -2,8 +2,8 @@
 # Official python manifest digest resolved from registry-1.docker.io.
 ARG BASE_IMAGE=python:3.12-slim-trixie@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 FROM ${BASE_IMAGE} AS builder
-ARG THREEPROXY_VERSION=0.9.5
-ARG THREEPROXY_SHA256=6f6da51d9bba93231e12acd707bb6cf86a1ab9491dc6dd0c79750cb3641541a3
+ARG THREEPROXY_VERSION=0.9.6
+ARG THREEPROXY_SHA256=5645111fb146faaaf260c27f0e07e510e8530a7e8a18369474cc8abbedbc9c9a
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends build-essential curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
@@ -44,6 +44,7 @@ RUN python -m pip check \
     && python -c 'import aiohttp, flask, gunicorn, requests, telebot; print("RUNTIME_DEPENDENCIES=OK")'
 COPY --from=builder /build/bin/3proxy /usr/local/bin/3proxy
 COPY app.py ipv6_manager.py proxy_config.py state_store.py service.py rpc.py validation.py worker.py credentials.py network_inventory.py /app/
+COPY resource_metrics.py host_control.py /app/
 COPY telegram_notify.py telegram_bot.py start.sh /app/
 COPY templates/ /app/templates/
 COPY static/ /app/static/

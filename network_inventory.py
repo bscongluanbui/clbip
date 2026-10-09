@@ -13,7 +13,22 @@ def usable_ipv4(value):
     return str(address)
 
 
-def collect(net, managed=()):
+def ownership_keys(records):
+    """Address ownership follows canonical IPv6 + interface, never prefix/order."""
+    return {(str(ipaddress.IPv6Address(r['address'])), r['interface']) for r in records}
+
+
+def annotate_addresses(records, managed=(), *, uncertain=(), interface=None):
+    """Keep the complete diagnostic inventory; add presentation-only origins."""
+    owned, pending = ownership_keys(managed), ownership_keys(uncertain)
+    result = copy.deepcopy(records)
+    for record in result:
+        key = (str(ipaddress.IPv6Address(record['address'])), record.get('interface', interface))
+        record['origin'] = 'managed' if key in owned else 'uncertain' if key in pending else 'system'
+    return result
+
+
+def collect(net, managed=(), *, uncertain=()):
     if hasattr(net, 'get_interface_inventory'):
         rows = net.get_interface_inventory()
     else:  # Retain compatibility with injected/older read-only backends.
@@ -21,9 +36,11 @@ def collect(net, managed=()):
         rows = [{'device': name, 'name': name, 'kind': 'Interface', 'active': None,
                  'ipv4': [], 'ipv6': [r for r in addresses if r['interface'] == name]}
                 for name in net.get_interfaces()]
-    owned = {(str(ipaddress.IPv6Address(r['address'])), r['interface']) for r in managed}
+    owned = ownership_keys(managed) | ownership_keys(uncertain)
     inventory = copy.deepcopy(rows)
     for row in inventory:
+        row['ipv6'] = annotate_addresses(row.get('ipv6', []), managed, uncertain=uncertain,
+                                         interface=row['device'])
         for record in row.get('ipv6', []):
             # Pool annotations are evidence from this observation only.
             record.pop('pool_prefix_len', None)
@@ -59,7 +76,16 @@ def collect(net, managed=()):
     for row in inventory:
         candidates = [r for r in row.get('ipv6', []) if eligible(r, row['device'], owned)]
         capable = bool(candidates) and row.get('active') is not False
-        row.update(pool_capable=capable, reason=(
+        # These subsets are presentation views; ipv6 always retains every record.
+        # Uncertain ownership is not a base candidate and is not counted as a
+        # confirmed tool-owned address, even while its kernel state is visible.
+        row.update(system_ipv6=[r for r in row['ipv6'] if r['origin'] == 'system'],
+                   source_ipv6=candidates if capable else [],
+                   managed_ipv6_count=len({str(ipaddress.IPv6Address(r['address']))
+                                           for r in row['ipv6'] if r['origin'] == 'managed'}),
+                   uncertain_ipv6_count=len({str(ipaddress.IPv6Address(r['address']))
+                                             for r in row['ipv6'] if r['origin'] == 'uncertain'}),
+                   pool_capable=capable, reason=(
             'Có IPv6 global/prefix để thử pool; DAD và egress sẽ được xác minh khi tạo.' if capable else
             'Interface chưa hoạt động.' if row.get('active') is False else
             'Chưa có IPv6 global còn hiệu lực với prefix pool/on-link usable ngoài alias của tool.'))
@@ -75,6 +101,7 @@ def _eligible_address(record, interface, owned):
                 record.get('ready') is True and record.get('valid_lft') != 0 and
                 record.get('preferred_lft') != 0 and
                 not set(record.get('flags', [])) & {'tentative', 'dadfailed', 'deprecated'} and
+                record.get('origin') not in {'managed', 'uncertain'} and
                 (str(address), interface) not in owned)
     except (ValueError, KeyError, TypeError):
         return False
@@ -92,7 +119,7 @@ def eligible(record, interface, owned):
 
 
 def observed_source(inventory, interface, managed=(), *, preferred=None):
-    owned = {(str(ipaddress.IPv6Address(r['address'])), r['interface']) for r in managed}
+    owned = ownership_keys(managed)
     for row in inventory:
         if row['device'] != interface or row.get('active') is False:
             continue

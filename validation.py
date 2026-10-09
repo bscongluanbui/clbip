@@ -15,6 +15,7 @@ DEFAULT_SETTINGS = {
     'listener_ipv4': '127.0.0.1', 'public_proxy': False,
     'dns1': '1.1.1.1', 'dns2': '8.8.8.8', 'dns3': '2606:4700:4700::1111',
     'max_connections': 64, 'log_enabled': True, 'timeout_connect': 10,
+    'thread_limit': 4096,
     'timeout_idle': 300, 'rotation_enabled': False, 'rotation_interval': 10,
     'auto_start': False, 'startup_rebuild_enabled': False, 'startup_proxy_count': 25,
     'topology_mode': 'lan', 'routed_prefix': '',
@@ -132,7 +133,7 @@ def settings_patch(data, previous=None):
         boolean(result[name], name)
     for name, lo, hi in [('prefix_len', 1, 128), ('start_port', 1024, 65535), ('max_connections', 1, 10000),
                          ('timeout_connect', 1, 120), ('timeout_idle', 1, 86400), ('rotation_interval', 1, 10080),
-                         ('probe_timeout', 1, 60), ('startup_proxy_count', 1, 1024),
+                         ('probe_timeout', 1, 60), ('startup_proxy_count', 1, 1024), ('thread_limit', 256, 16384),
                          ('source_change_confirmations', 1, 10), ('source_poll_interval', 2, 300)]:
         integer(result[name], name, lo, hi)
     interface(result['interface'])

@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import socket
 import threading
+import time
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -898,10 +899,13 @@ class ServiceTests(unittest.TestCase):
         self.generate(count=2, interface='eth1', subnet=POOL,
                       topology_mode='routed', routed_prefix='2606:4700:1::/48')
         proxies = self.store.read()['proxies']
-        self.service.last_base_probe = self.service.started_at
+        # Suppress a base probe independently of how long fixture generation took.
+        now = time.time()
+        self.service.last_base_probe = now
         self.service.last_probe = 0
         self.events.clear()
-        self.service.reconcile()
+        with patch('service.time.time', return_value=now):
+            self.service.reconcile()
         self.assertEqual([event for event in self.events if event[0] == 'restore'],
                          [('restore', 7, True, False)])
         probes = [event for event in self.events if event[0] == 'probe']

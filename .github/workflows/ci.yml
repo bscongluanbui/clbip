@@ -50,6 +50,7 @@ jobs:
           node tests/test_frontend.js
           node tests/test_frontend_upgrade.js
           bash -n start.sh
+          bash -n scripts/install_host_controller.sh
           docker compose config --quiet
       - name: Install exact dependency artifacts
         run: |
@@ -71,6 +72,13 @@ jobs:
             --entrypoint python ipv6-proxy-manager:local "/tests/$SCRIPT" --run
       - name: Isolated worker/dashboard roles and authenticated IPC
         run: .venv/bin/python tests/integration_roles.py --run
+      - name: Real 3proxy DNS timeout and closed-client cleanup regression
+        run: |
+          docker run --platform "$PLATFORM" --rm --network none --user 0:10001 --cap-drop ALL --cap-add NET_ADMIN \
+            --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=64m \
+            -e IPV6_INTEGRATION_ISOLATED=1 \
+            --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
+            --entrypoint python ipv6-proxy-manager:local /tests/integration_dns_timeout.py --run
       - name: Generate image package inventory
         run: docker run --rm --entrypoint pip ipv6-proxy-manager:local list --format=json > image-python-packages.json
       - name: Generate full image CycloneDX SBOM (OS and application packages)

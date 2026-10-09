@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +16,8 @@ import uuid
 import ipv6_manager as network
 import proxy_config as engine
 import network_inventory
+from host_control import HostControlError
+from resource_metrics import ResourceMetricsSampler
 from state_store import StateStore
 from validation import (DEFAULT_SETTINGS, ValidationError, boolean, credential, generation_auth, integer, interface,
                         public_settings, settings_patch, target_url)
@@ -26,6 +29,12 @@ class OperationError(RuntimeError):
 
 ALIAS_BATCH_SIZE = 16
 VERIFY_WORKERS = 8
+# Only these settings are consumed by an existing pool's rendered listeners.
+# Allocation/protocol defaults affect future generation, not current proxy rows.
+ENGINE_SETTING_FIELDS = frozenset({'dns1', 'dns2', 'dns3', 'timeout_connect', 'timeout_idle',
+                                  'log_enabled', 'max_connections', 'listener_ipv4',
+                                  'auth_type', 'allow_private_destinations'})
+ROTATION_SETTING_FIELDS = frozenset({'rotation_enabled', 'rotation_interval'})
 
 
 def address_key(record):
@@ -34,10 +43,15 @@ def address_key(record):
 
 
 class ProxyService:
-    def __init__(self, data_dir=None, *, store=None, net=None, proxy=None):
+    def __init__(self, data_dir=None, *, store=None, net=None, proxy=None, host_control=None):
         self.store = store or StateStore(data_dir or os.environ.get('DATA_DIR', '/app/data'))
         self.net = net or network
         self.engine = proxy or engine
+        if host_control is None:
+            from host_control import HostControlClient
+            host_control = HostControlClient()
+        self.host_control = host_control
+        self.metrics_sampler = ResourceMetricsSampler()
         self.lock = threading.RLock()
         self.started_at = time.time()
         self.last_probe = 0
@@ -147,6 +161,11 @@ class ProxyService:
                 if cache[key]['status'] != 'complete':
                     raise OperationError('Operation cũ chưa có kết quả xác minh; không chạy lặp')
                 return copy.deepcopy(cache[key]['result'])
+            # An unchanged save has no side effect to journal. Preserve the
+            # state revision even when a dashboard supplies a new request key.
+            if (method == 'save_settings' and
+                    settings_patch(params, state['settings']) == settings_patch({}, state['settings'])):
+                return self._invoke(methods[method], params)
             cache[key] = {'signature': signature, 'status': 'pending', 'time': time.time()}
             state['operations'] = dict(list(cache.items())[-100:])
             self.store.write(state)
@@ -392,7 +411,13 @@ class ProxyService:
             self._checkpoint()
             proposed['pending_operation'] = None
             proposed['last_error'] = ''
-            proposed['rotation_due'] = time.time() + proposed['settings']['rotation_interval'] * 60
+            if (action != 'settings.apply' or any(proposed['settings'][key] != before['settings'][key]
+                                                 for key in ROTATION_SETTING_FIELDS)):
+                proposed['rotation_due'] = (0 if action == 'settings.apply' and
+                                           not proposed['settings']['rotation_enabled'] else
+                                           time.time() + proposed['settings']['rotation_interval'] * 60)
+            else:
+                proposed['rotation_due'] = before['rotation_due']
             active = {address_key(p) for p in proposed['proxies']}
             merged = {address_key(r): copy.deepcopy(r) for r in pending['managed_addresses']}
             for p in proposed['proxies']:
@@ -466,17 +491,74 @@ class ProxyService:
         return public_settings(self.store.read()['settings'])
 
     def save_settings(self, params):
-        state = self.store.read()
-        recovering = self._recovery_active(state)
-        state['settings'] = settings_patch(params, state['settings'])
-        if recovering:
-            if not state['settings']['startup_rebuild_enabled']:
-                state['startup_recovery'] = None
-                state['desired_state'], state['manual_stop'] = 'stopped', True
-            result = self._commit_recovery_edit(state, 'settings.apply')
-        else:
-            result = self._transaction(state, [], 'settings.apply')
-        return {**result, 'settings': public_settings(state['settings'])}
+        before = self.store.read()
+        previous = settings_patch({}, before['settings'])
+        updated = settings_patch(params, previous)
+        changed_fields = {key for key in updated if updated[key] != previous[key]}
+        if not changed_fields:
+            return {'success': True, 'changed': False, 'restarted': False,
+                    'revision': before['revision'], 'settings': public_settings(previous)}
+
+        state = copy.deepcopy(before)
+        state['settings'] = updated
+        self._validate(state)
+        recovering = self._recovery_active(before)
+        engine_changed = bool(changed_fields & ENGINE_SETTING_FIELDS)
+        if 'allowed_ips' in changed_fields and updated['auth_type'] == 'ip':
+            engine_changed = True
+        if changed_fields & ROTATION_SETTING_FIELDS:
+            state['rotation_due'] = (time.time() + updated['rotation_interval'] * 60
+                                     if updated['rotation_enabled'] else 0)
+        if recovering and not updated['startup_rebuild_enabled']:
+            state['startup_recovery'] = None
+            state['desired_state'], state['manual_stop'] = 'stopped', True
+
+        receipt = None
+        try:
+            self._checkpoint()
+            if 'thread_limit' in changed_fields:
+                try:
+                    receipt = self.host_control.apply_limit(updated['thread_limit'])
+                except HostControlError as exc:
+                    raise OperationError(str(exc)) from exc
+                if (not isinstance(receipt, dict) or
+                        receipt.get('effective_limit') != updated['thread_limit'] or
+                        'previous_limit' not in receipt):
+                    raise OperationError('Host chưa xác nhận trần thread đã yêu cầu')
+            self._checkpoint()
+            if recovering and engine_changed:
+                # Never activate stale listeners during startup recovery.
+                result = self._commit_recovery_edit(state, 'settings.apply')
+            elif engine_changed:
+                result = self._transaction(state, [], 'settings.apply')
+            else:
+                # No config snapshot/write, process restart, alias cleanup or
+                # pool remapping belongs to a control-only settings save.
+                self.store.event(state, 'settings.apply', 'updated_without_activation',
+                                 ','.join(sorted(changed_fields)))
+                committed = self.store.write(state)
+                result = {'success': True, 'revision': committed['revision']}
+                if recovering:
+                    result['queued'] = True
+        except Exception:
+            if isinstance(receipt, dict) and 'previous_limit' in receipt:
+                # Transaction errors before commit restore the host limit too.
+                # A post-commit cleanup error must not undo a committed limit.
+                persisted = self.store.read()
+                if persisted['settings'] != state['settings']:
+                    try:
+                        self.host_control.restore_limit(receipt['previous_limit'])
+                    except Exception as rollback_exc:
+                        raise OperationError('Khôi phục trần thread cần kiểm tra host') from rollback_exc
+            raise
+        result.update(changed=True, changed_fields=sorted(changed_fields),
+                      engine_config_changed=engine_changed,
+                      restarted=bool(engine_changed and not recovering and
+                                     state['desired_state'] == 'running' and state['proxies']),
+                      settings=public_settings(updated))
+        if receipt is not None:
+            result.update(thread_limit_applied=True, effective_thread_limit=receipt['effective_limit'])
+        return result
 
     def users(self, params):
         return {'users': [{k: v for k, v in u.items() if k != 'password'} for u in self.store.read()['users']]}
@@ -502,15 +584,28 @@ class ProxyService:
         rows = self._refresh_inventory(self.store.read())
         return {'interfaces': [row['device'] for row in rows], 'details': rows}
 
+    def _inventory_ownership(self, state):
+        # Readers can run while a creation callback is still in flight. Its
+        # durable attempting/unknown intent is not a confirmed owner, but must
+        # not be mistaken for a new system/base address in that window.
+        uncertain = list(state['uncertain_addresses'])
+        if state.get('pending_operation'):
+            uncertain += self._uncertain_stages(state['pending_operation'])
+        return state['managed_addresses'], uncertain
+
     def _refresh_inventory(self, state):
         """Passive local observation, independent of network mutation ownership."""
         try:
-            rows = network_inventory.collect(self.net, state['managed_addresses'] + state['uncertain_addresses'])
+            managed, uncertain = self._inventory_ownership(state)
+            rows = network_inventory.collect(self.net, managed, uncertain=uncertain)
             verified = state['prefix_state'].get(state['settings']['interface'], {})
             source = network_inventory.observed_source(rows, state['settings']['interface'],
-                state['managed_addresses'] + state['uncertain_addresses'], preferred=verified)
-            proven = bool(source and verified.get('address') == source['address'] and
-                          verified.get('verified') is True and not state['last_error'])
+                managed + uncertain, preferred=verified)
+            try:
+                proven = bool(source and verified.get('verified') is True and not state['last_error'] and
+                              ipaddress.IPv6Address(verified['address']) == ipaddress.IPv6Address(source['address']))
+            except (ValueError, TypeError, KeyError):
+                proven = False
             hosts = network_inventory.hosts(rows)
             view = {'current_source': source, 'source_verified': proven,
                     'source_observed_at': time.time(), 'source_error': '',
@@ -546,32 +641,35 @@ class ProxyService:
 
     def addresses(self, params):
         iface = params.get('interface')
-        return {'addresses': self.net.get_ipv6_addresses(interface(iface) if iface else None, strict=True)}
+        managed, uncertain = self._inventory_ownership(self.store.read())
+        records = self.net.get_ipv6_addresses(interface(iface) if iface else None, strict=True)
+        return {'addresses': network_inventory.annotate_addresses(records, managed, uncertain=uncertain)}
 
     def subnets(self, params):
         iface = interface(params.get('interface', 'eth0'))
         state = self.store.read()
-        owned = {str(ipaddress.IPv6Address(r['address'])) for r in
-                 state['managed_addresses'] + state['uncertain_addresses'] if r['interface'] == iface}
+        managed, uncertain = self._inventory_ownership(state)
         verified = state['prefix_state'].get(iface, {}) if not state['last_error'] else {}
         seen = {}
-        records = self.net.get_ipv6_addresses(iface, strict=True)
-        pool_lengths = {}
-        if any(r['prefix_len'] == 128 and r['address'] not in owned for r in records):
-            for row in network_inventory.collect(self.net, state['managed_addresses'] + state['uncertain_addresses']):
-                if row['device'] == iface:
-                    pool_lengths = {r['address']: r.get('pool_prefix_len') for r in row.get('ipv6', [])}
+        rows = network_inventory.collect(self.net, managed, uncertain=uncertain)
+        records = [record for row in rows if row['device'] == iface for record in row['source_ipv6']]
+        try:
+            verified_address = str(ipaddress.IPv6Address(verified['address'])) if verified.get('verified') is True else None
+        except (ValueError, TypeError, KeyError):
+            verified_address = None
+        # Preserve the verified system source when multiple SLAAC/privacy
+        # addresses share a prefix; later raw inventory order is not proof.
+        records.sort(key=lambda r: (str(ipaddress.IPv6Address(r['address'])) != verified_address,
+                                    'temporary' in r.get('flags', []), r['address']))
         for record in records:
             addr = ipaddress.IPv6Address(record['address'])
-            if str(addr) in owned or not addr.is_global or not record.get('ready') or record.get('preferred_lft', 0) == 0:
-                continue
-            length = pool_lengths.get(str(addr)) if record['prefix_len'] == 128 else record['prefix_len']
-            if length is None:  # A DHCPv6 host /128 is not an allocation for N aliases.
-                continue
+            length = record.get('pool_prefix_len', record['prefix_len'])
             net = ipaddress.IPv6Network(f"{addr}/{length}", strict=False)
+            if str(net) in seen:
+                continue
             seen[str(net)] = {'subnet': str(net.network_address), 'prefix_len': net.prefixlen,
                               'full': str(net), 'source_address': str(addr),
-                              'verified': verified.get('verified') is True and verified.get('address') == str(addr)}
+                              'verified': verified_address == str(addr)}
         return {'subnets': list(seen.values()), 'interface': iface}
 
     def proxies(self, params):
@@ -890,7 +988,22 @@ class ProxyService:
                 ndp['errors'].append(f'{iface}: observation unavailable')
         if ndp['errors']:
             ndp['neighbor_count'] = None
-        return {'worker': worker, 'proxy_children': children, 'ndp': ndp}
+        return {'worker': worker, 'proxy_children': children, 'ndp': ndp,
+                'resources': self._resource_observation(state, children)}
+
+    def _resource_observation(self, state, children=None):
+        # The sampler reads a bounded /proc/cgroup snapshot at most every five
+        # seconds. Cached status does not run engine/NIC inspection commands.
+        resources = self.metrics_sampler.collect(proxies=state['proxies'], engine_metrics=children,
+                                                configured_limit=state['settings'].get('thread_limit', 4096))
+        controller = {'available': False, 'effective_limit': None}
+        if hasattr(self.host_control, 'status'):
+            try:
+                controller = self.host_control.status()
+            except (AttributeError, OSError, RuntimeError, ValueError):
+                controller['error'] = 'Host PID controller observation unavailable'
+        resources['host_control'] = controller
+        return resources
 
     @staticmethod
     def _uncertain_stages(pending):
@@ -970,7 +1083,12 @@ class ProxyService:
         cmd = ['curl', '--disable', '--silent', '--show-error', '--output', os.devnull, '--config', '-',
                '--proxy', f'{url_proto}://127.0.0.1:{proxy["port"]}', '--noproxy', '',
                '--proto', '=https', '--connect-timeout', str(settings['timeout_connect']),
-               '--max-time', '30', '--write-out', '{"total_time":%{time_total},"ttfb":%{time_starttransfer},"http_code":"%{http_code}","speed_download":%{speed_download}}',
+               '--max-time', '30', '--write-out',
+               '{"dns_lookup":%{time_namelookup},"tcp_connect":%{time_connect},'
+               '"tls_handshake":%{time_appconnect},"total_time":%{time_total},'
+               '"ttfb":%{time_starttransfer},"http_code":"%{http_code}",'
+               '"speed_download":%{speed_download},"size_download":%{size_download},'
+               '"remote_ip":"%{remote_ip}"}',
                '--url', url]
         # A specific LAN listener may not accept loopback; use the configured address, never a caller's host.
         if settings['listener_ipv4'] not in ('0.0.0.0', '127.0.0.1'):
@@ -978,13 +1096,33 @@ class ProxyService:
         try:
             result = subprocess.run(cmd, input=config, capture_output=True, text=True, timeout=35)
             data = json.loads(result.stdout) if result.stdout else {}
+            if not isinstance(data, dict):
+                raise ValueError('Invalid curl metrics')
+            for field in ('dns_lookup', 'tcp_connect', 'tls_handshake', 'total_time', 'ttfb',
+                          'speed_download', 'size_download'):
+                value = float(data.get(field, 0))
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError('Invalid curl metric')
+                data[field] = value
             code = int(data.get('http_code', 0))
             data.update(success=result.returncode == 0 and 200 <= code < 400, port=proxy['port'], ipv6=proxy['ipv6'], proxy_id=proxy['id'])
-            data['speed_kbps'] = round(float(data.get('speed_download', 0))/1024, 2)
+            data['speed_bytes_per_second'] = data['speed_download']
+            data['speed_kbps'] = round(data['speed_download']/1024, 2)  # Legacy API: KiB/s, not kbit/s.
+            data['speed_mbps'] = round(data['speed_download'] * 8 / 1_000_000, 3)
+            data['download_bytes'] = data['size_download']
+            # With --proxy, curl's remote_ip is its immediate proxy peer, not
+            # the destination nor proof of the source IPv6 used by that proxy.
+            data['remote_ip'] = str(ipaddress.ip_address(data['remote_ip'])) if data.get('remote_ip') else ''
+            data['proxy_peer_ip'] = data['remote_ip']
+            data['remote_ip_role'] = 'proxy_peer'
+            data['timing_scope'] = 'curl_via_proxy'
+            from urllib.parse import urlsplit
+            data['target_host'] = urlsplit(url).hostname
+            data['transfer_rate_scope'] = 'sample_response'
             if not data['success']:
                 data['error'] = 'Proxy transport/auth/DNS/target failed'
             return data
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
             return {'success': False, 'port': proxy['port'], 'proxy_id': proxy['id'], 'error': 'Proxy probe failed'}
 
     def speedtest(self, params):
@@ -1069,6 +1207,7 @@ class ProxyService:
     def _recovery_status_snapshot(self, state):
         settings = state['settings']
         processes, metrics = self._cached_observation()
+        metrics['resources'] = self._resource_observation(state, metrics.get('proxy_children'))
         progress = self._progress_snapshot()
         observation = 'cached_during_mutation' if progress['active'] or self._recovery_active(state) else 'cached'
         return {'proxy_running': processes.get('ready'), 'proxy_pid': None, 'total_proxies': len(state['proxies']),
@@ -1085,6 +1224,7 @@ class ProxyService:
     def _recovery_health_snapshot(self, state):
         recovery = self._startup_status(state)
         processes, metrics = self._cached_observation()
+        metrics['resources'] = self._resource_observation(state, metrics.get('proxy_children'))
         progress = self._progress_snapshot()
         error = state['last_error'] or (recovery.get('message') if self._recovery_active(state) else
                                        'Operation đang xử lý; health chi tiết chờ mutation hoàn tất')
