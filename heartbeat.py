@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,6 +22,9 @@ DEFAULT_INTERVAL = 60
 DEFAULT_TIMEOUT = 5
 DEFAULT_STALE_AFTER = 330
 MAX_URL_LENGTH = 2048
+MAX_ATTEMPTS = 3
+MAX_CYCLE_SECONDS = 25.0
+RETRY_BACKOFF_SECONDS = (1.0, 2.0)
 
 
 def _number(value, default, minimum, maximum, name):
@@ -108,6 +112,10 @@ class HeartbeatMonitor:
         self.last_success_monotonic = None
         self.attempts = 0
         self.successes = 0
+        self.retries = 0
+        self.cycles = 0
+        self.last_http_status = None
+        self._logged_state = None
         try:
             value = environ.get('HEARTBEAT_URL', '')
             filename = environ.get('HEARTBEAT_URL_FILE', '')
@@ -159,67 +167,129 @@ class HeartbeatMonitor:
                 'interval_seconds': self.interval, 'timeout_seconds': self.timeout,
                 'stale_after_seconds': self.stale_after, 'last_result': self.last_result,
                 'attempts': self.attempts, 'successes': self.successes,
+                'retries': self.retries, 'cycles': self.cycles,
+                'max_attempts_per_cycle': MAX_ATTEMPTS,
+                'cycle_budget_seconds': MAX_CYCLE_SECONDS,
+                'last_http_status': self.last_http_status,
                 'last_success_monotonic': self.last_success_monotonic}
 
-    def emit_once(self, health_provider, stop_event=None):
-        if not self.enabled:
-            return self.last_result
+    def _result(self, value):
+        """Log state transitions only; never include endpoint/provider exceptions."""
+        self.last_result = value
+        state = (value, self.last_http_status)
+        if state != self._logged_state:
+            self.logger.info('Heartbeat state=%s http_status=%s',
+                             value, self.last_http_status)
+            self._logged_state = state
+        return value
+
+    def _health_result(self, health_provider):
         try:
             observation = health_provider()
             if not isinstance(observation, dict) or observation.get('healthy') is not True:
-                self.last_result = 'unhealthy'
-                return self.last_result
+                return 'unhealthy'
             stamp = observation.get('last_reconcile_monotonic')
             now = self.monotonic()
             if (isinstance(stamp, bool) or not isinstance(stamp, (float, int))
                     or not math.isfinite(stamp) or stamp < 0 or stamp > now):
-                self.last_result = 'health_unavailable'
-                return self.last_result
+                return 'health_unavailable'
             if now - stamp > self.stale_after:
-                self.last_result = 'stale'
-                return self.last_result
+                return 'stale'
         except Exception:
-            # Neither provider exception text nor a stale cached success is sent.
-            self.last_result = 'health_unavailable'
+            # A failed snapshot never reuses an earlier healthy observation.
+            return 'health_unavailable'
+        return None
+
+    def emit_once(self, health_provider, stop_event=None):
+        if not self.enabled:
             return self.last_result
-        self.attempts += 1
-        if stop_event is not None and stop_event.is_set():
-            self.last_result = 'stopped'
-            self.attempts -= 1
-            return self.last_result
-        response = None
-        try:
-            headers = {'User-Agent': 'clbip-heartbeat/1.0'}
-            if self._token:
-                headers['Authorization'] = 'Bearer ' + self._token
-            response = self.session.post(self._url, data=b'', timeout=self.timeout,
-                                         allow_redirects=False, stream=True,
-                                         headers=headers)
-            if not 200 <= response.status_code < 300:
-                self.last_result = 'http_error'
-                return self.last_result
-            self.successes += 1
-            self.last_success_monotonic = self.monotonic()
-            self.last_result = 'sent'
-        except Exception:
-            # requests exceptions commonly contain the secret URL. Do not
-            # propagate/log them; missing heartbeats are the external signal.
-            self.last_result = 'transport_error'
-        finally:
-            if response is not None:
-                try:
-                    response.close()
-                except Exception:
-                    pass
+        self.cycles += 1
+        self.last_http_status = None
+        stopper = stop_event if stop_event is not None else threading.Event()
+        deadline = self.monotonic() + MAX_CYCLE_SECONDS
+        for attempt in range(MAX_ATTEMPTS):
+            if stopper.is_set():
+                return self._result('stopped')
+            reason = self._health_result(health_provider)
+            if reason is not None:
+                return self._result(reason)
+            # A provider can trigger shutdown while taking its snapshot.
+            if stopper.is_set():
+                return self._result('stopped')
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                return self._result('cycle_budget_exhausted')
+            self.attempts += 1
+            if attempt:
+                self.retries += 1
+            response = None
+            retryable = False
+            self.last_http_status = None
+            try:
+                headers = {'User-Agent': 'clbip-heartbeat/1.0'}
+                if self._token:
+                    headers['Authorization'] = 'Bearer ' + self._token
+                # Requests scalar timeouts bound connect and read independently.
+                # Leave half the remaining retry-cycle allowance for each phase.
+                # DNS resolution and trickle headers are not a total deadline;
+                # prefer a literal Tailscale IP for the watchdog endpoint.
+                timeout = min(self.timeout, remaining / 2.0)
+                response = self.session.post(self._url, data=b'', timeout=timeout,
+                                             allow_redirects=False, stream=True,
+                                             headers=headers)
+                code = response.status_code
+                if isinstance(code, bool) or not isinstance(code, int):
+                    self._result('transport_error')
+                else:
+                    self.last_http_status = code
+                    if 200 <= code < 300:
+                        self.successes += 1
+                        self.last_success_monotonic = self.monotonic()
+                        return self._result('sent')
+                    retryable = code in (408, 429) or 500 <= code < 600
+                    self._result('http_error')
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                # Exception strings commonly contain the endpoint and token.
+                retryable = True
+                self._result('transport_error')
+            except Exception:
+                # Invalid requests/programming errors are not transient transport
+                # failures. Preserve a sanitized failure but do not repeat them.
+                self._result('transport_error')
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+            if not retryable or attempt == MAX_ATTEMPTS - 1:
+                break
+            remaining = deadline - self.monotonic()
+            delay = RETRY_BACKOFF_SECONDS[attempt]
+            if remaining <= delay:
+                break
+            if stopper.wait(delay):
+                return self._result('stopped')
         return self.last_result
 
     def run(self, stop_event, health_provider):
         if not self.enabled:
             return
+        # Fixed monotonic tick deadlines prevent slow network requests from
+        # adding a complete interval to every beat and drifting toward alarm.
+        next_tick = self.monotonic()
         try:
             while not stop_event.is_set():
                 self.emit_once(health_provider, stop_event=stop_event)
-                if stop_event.wait(self.interval):
+                if stop_event.is_set():
+                    break
+                next_tick += self.interval
+                now = self.monotonic()
+                if next_tick <= now:
+                    # Never replay missed ticks or busy-loop after an overrun.
+                    missed = math.floor((now - next_tick) / self.interval) + 1
+                    next_tick += missed * self.interval
+                if stop_event.wait(max(0.0, next_tick - now)):
                     break
         finally:
             try:

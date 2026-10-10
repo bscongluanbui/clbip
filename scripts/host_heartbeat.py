@@ -2,9 +2,10 @@
 """Read-only host heartbeat for an existing dashboard/worker installation.
 
 This agent does not touch Docker, network addresses, or the proxy pool. A fresh
-positive /readyz response is required for each beat. Intentional proxy stop is a
-valid ready state when the dashboard/worker reports it as ready. The heartbeat
-therefore proves control-plane readiness, not every destination or proxy port.
+positive /heartbeatz response is required for each beat. A live worker with fresh
+progress may have an unready pool during a rebuild without losing its heartbeat.
+An explicitly configured /readyz target retains strict legacy readiness checks.
+Neither observation proves every destination or proxy port is working.
 
 Run with a systemd EnvironmentFile; Python never parses or sources that file.
 --check validates configuration without making any HTTP request.
@@ -30,7 +31,7 @@ if str(_root) not in sys.path:
 from heartbeat import HeartbeatMonitor
 
 
-DEFAULT_DASHBOARD_URL = 'http://127.0.0.1:7070/readyz'
+DEFAULT_DASHBOARD_URL = 'http://127.0.0.1:7070/heartbeatz'
 MAX_BODY = 4096
 PROBE_DEADLINE = 8.0
 logger = logging.getLogger('host_heartbeat')
@@ -40,7 +41,7 @@ _LOCAL_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
 
 
 def validate_dashboard_url(value):
-    """Permit only an operator-fixed local literal IP and the /readyz path.
+    """Permit only a local literal IP and /heartbeatz or legacy /readyz.
 
     No name resolution, redirects, credentials, or arbitrary HTTP paths are
     accepted. LAN/ULA addresses accommodate dashboards bound away from loopback.
@@ -54,7 +55,7 @@ def validate_dashboard_url(value):
         parts = urlsplit(value)
         if (parts.scheme != 'http' or not parts.hostname
                 or parts.username is not None or parts.password is not None
-                or parts.path != '/readyz' or parts.query or parts.fragment
+                or parts.path not in ('/heartbeatz', '/readyz') or parts.query or parts.fragment
                 or parts.netloc.endswith(':')):
             raise ValueError
         if parts.port is not None and not 1 <= parts.port <= 65535:
@@ -81,6 +82,7 @@ class DashboardProbe:
                  logger=None, deadline=PROBE_DEADLINE):
         env = os.environ if environ is None else environ
         self._url = validate_dashboard_url(env.get('LOCAL_DASHBOARD_URL', DEFAULT_DASHBOARD_URL))
+        self.mode = 'liveness' if urlsplit(self._url).path == '/heartbeatz' else 'readiness'
         self.session = session
         if session is not None:
             session.trust_env = False
@@ -99,11 +101,11 @@ class DashboardProbe:
         previous = self.last_result
         self.last_result = result
         if previous != result:
-            if result == 'ready':
+            if result in ('ready', 'alive'):
                 if previous != 'not_checked':
-                    self.logger.info('Dashboard readiness recovered')
+                    self.logger.info('Dashboard %s recovered', self.mode)
             elif result != 'stopped':
-                self.logger.warning('Dashboard not ready: %s', result)
+                self.logger.warning('Dashboard %s probe failed: %s', self.mode, result)
 
     def _request(self, done, result):
         response = None
@@ -146,11 +148,26 @@ class DashboardProbe:
             def reject_constant(_):
                 raise ValueError
             payload = json.loads(body.decode('utf-8'), parse_constant=reject_constant)
-            if not isinstance(payload, dict) or payload.get('ready') is not True:
-                result['status'] = 'not_ready'
-                return
+            if self.mode == 'readiness':
+                if not isinstance(payload, dict) or payload.get('ready') is not True:
+                    result['status'] = 'not_ready'
+                    return
+                status = 'ready'
+            else:
+                flags = ('alive', 'worker_alive', 'progress_fresh')
+                if (not isinstance(payload, dict)
+                        or any(type(payload.get(flag)) is not bool for flag in flags)):
+                    result['status'] = 'invalid_liveness'
+                    return
+                for flag, failure in (('alive', 'dashboard_not_alive'),
+                                      ('worker_alive', 'worker_not_alive'),
+                                      ('progress_fresh', 'progress_stale')):
+                    if payload[flag] is not True:
+                        result['status'] = failure
+                        return
+                status = 'alive'
             result['stamp'] = self.monotonic()
-            result['status'] = 'ready'
+            result['status'] = status
         except Exception:
             # Exception messages can contain configured URLs. No values escape.
             result['status'] = 'probe_failed'
@@ -176,7 +193,7 @@ class DashboardProbe:
                 self.session.trust_env = False
             done, result = threading.Event(), {}
             thread = threading.Thread(target=self._request, args=(done, result),
-                                      name='host-readyz-probe', daemon=True)
+                                      name='host-health-probe', daemon=True)
             self._thread = thread
             thread.start()
         if not done.wait(self.deadline):
@@ -190,7 +207,7 @@ class DashboardProbe:
                 self._thread = None
         status = result.get('status', 'probe_failed')
         self._record(status)
-        if status == 'ready':
+        if status in ('ready', 'alive'):
             return {'healthy': True, 'last_reconcile_monotonic': result['stamp']}
         return unhealthy
 

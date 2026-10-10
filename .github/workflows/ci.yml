@@ -85,6 +85,13 @@ jobs:
             --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=32m \
             --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
             --entrypoint python ipv6-proxy-manager:local /tests/integration_watchdog_nodes.py --run
+      - name: Isolated heartbeat liveness versus busy readiness regression
+        run: |
+          docker run --platform "$PLATFORM" --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=32m \
+            --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
+            --mount type=bind,src="$(pwd)/scripts",dst=/scripts,readonly \
+            --entrypoint python ipv6-proxy-manager:local /tests/integration_heartbeat_liveness.py --run
       - name: Real 3proxy DNS timeout and closed-client cleanup regression
         run: |
           docker run --platform "$PLATFORM" --rm --network none --user 0:10001 --cap-drop ALL --cap-add NET_ADMIN \

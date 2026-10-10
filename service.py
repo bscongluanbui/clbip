@@ -91,6 +91,12 @@ class ProxyService:
         self.inventory_observed_at = 0
         self.source_candidates = {}
         self.last_reconcile_monotonic = time.monotonic()
+        # Liveness uses actual monotonic checkpoints, not pool readiness or a
+        # timestamp fabricated when an HTTP/RPC observer asks for a snapshot.
+        self.last_reconciler_progress_monotonic = self.last_reconcile_monotonic
+        self.reconciler_thread = None
+        self.reconciler_waiting_for_lock = False
+        self.liveness_operation = (False, self.last_reconcile_monotonic)
         self.alerts_error = ''
         try:
             self.alerts = AlertOutbox(self.store.path)
@@ -102,6 +108,12 @@ class ProxyService:
             logging.error('Alert storage initialization failed: %s', type(exc).__name__)
 
     def dispatch(self, method, params):
+        # This read-only liveness path must not touch SQLite/alert storage or
+        # wait behind NIC/engine mutation. Readiness/errors have their own path.
+        if method == 'controlplane_liveness':
+            if not isinstance(params, dict) or params:
+                raise ValidationError('Liveness không nhận tham số')
+            return self.controlplane_liveness()
         # No HTTP/Telegram request runs in this path. Queue only, then let the
         # independent sender deliver outside the network mutation lock.
         key = 'operation:' + (method if isinstance(method, str) and method.isidentifier() and len(method) <= 64 else 'invalid')
@@ -170,14 +182,39 @@ class ProxyService:
         except Exception as exc:
             return {'available': False, 'error': type(exc).__name__}
 
+    def controlplane_liveness(self):
+        """Fresh worker/reconciler activity only; no IO, mutation, or locks."""
+        thread = self.reconciler_thread
+        reconciler_alive = bool(thread is not None and thread.is_alive()
+                                and not self.stop_event.is_set())
+        stamp = self.last_reconciler_progress_monotonic
+        active, operation_stamp = self.liveness_operation
+        now = time.monotonic()
+        # A reconciler waiting for a build's mutation lock is not hung if the
+        # owning operation is making real progress. Unrelated health reads do
+        # not refresh this marker; a stalled operation expires normally.
+        if (self.reconciler_waiting_for_lock and active
+                and 0 <= now - operation_stamp < 330):
+            stamp = max(stamp, operation_stamp)
+        progress_fresh = bool(math.isfinite(stamp) and 0 <= now - stamp < 330)
+        return {'healthy': reconciler_alive and progress_fresh,
+                'reconciler_alive': reconciler_alive, 'progress_fresh': progress_fresh,
+                'last_reconcile_monotonic': stamp}
+
+    def _note_liveness_progress(self):
+        now = time.monotonic()
+        if threading.current_thread() is self.reconciler_thread:
+            self.last_reconciler_progress_monotonic = now
+        active, _ = self.liveness_operation
+        if active:
+            self.liveness_operation = (True, now)
+
     def heartbeat_snapshot(self):
-        """SQLite/cached liveness only; never wait for NIC probes or service lock."""
+        """Legacy strict pool health snapshot; not the control-plane heartbeat."""
         try:
             state = self.store.read()
-            progress = self._progress_snapshot()
-            stamp = self.last_reconcile_monotonic
-            if progress['active'] and time.time() - progress['last_update'] < 60:
-                stamp = time.monotonic()
+            stamp = max(self.last_reconcile_monotonic,
+                        self.last_reconciler_progress_monotonic)
             healthy = not self.health_error and not self.alerts_error
             if state['desired_state'] == 'running':
                 healthy = healthy and not state['last_error'] and not self._recovery_active(state) and not self.source_candidates
@@ -309,6 +346,8 @@ class ProxyService:
             self.progress_depth += 1
             if outer:
                 self.progress_started = time.monotonic()
+                self.liveness_operation = (True, self.progress_started)
+                self._note_liveness_progress()
                 self.progress.update(stage=stage, total=total, added=0, ready=0,
                                      verified=0, elapsed_seconds=0, last_update=time.time(),
                                      active=True, failed=False, address='', last_error='')
@@ -325,11 +364,14 @@ class ProxyService:
                     if self.progress['stage'] not in {'failed', 'canceled'}:
                         self.progress['stage'] = 'complete'
                     self.progress['active'] = False
+                    self.liveness_operation = (False, time.monotonic())
+                    self._note_liveness_progress()
                     self.progress['address'] = ''
                     self.progress['last_update'] = time.time()
                     self.progress['elapsed_seconds'] = round(max(0, time.monotonic() - self.progress_started), 3)
 
     def _progress_update(self, *, increment=None, **fields):
+        self._note_liveness_progress()
         with self.progress_lock:
             self.progress.update(fields)
             for field, value in (increment or {}).items():
@@ -592,10 +634,12 @@ class ProxyService:
             raise OperationError('Operation canceled by Stop; rollback giữ snapshot trước')
         if self.operation_deadline is not None and time.monotonic() >= self.operation_deadline:
             raise OperationError('Operation time budget hết; rollback giữ snapshot trước')
+        self._note_liveness_progress()
 
     def _cancellation_checkpoint(self):
         if self.cancel_operation.is_set() or self.stop_event.is_set():
             raise OperationError('Operation canceled by Stop')
+        self._note_liveness_progress()
 
     def settings(self, params):
         return public_settings(self.store.read()['settings'])
@@ -1570,8 +1614,18 @@ class ProxyService:
         self.store.write(before)
 
     def reconcile(self):
-        with self.lock:
-            return self._invoke(self._reconcile, {})
+        owned = threading.current_thread() is self.reconciler_thread
+        if owned:
+            self.reconciler_waiting_for_lock = True
+        try:
+            with self.lock:
+                if owned:
+                    self.reconciler_waiting_for_lock = False
+                    self._note_liveness_progress()
+                return self._invoke(self._reconcile, {})
+        finally:
+            if owned:
+                self.reconciler_waiting_for_lock = False
 
     def _reconcile(self, params):
         with self.lock:
@@ -1712,6 +1766,8 @@ class ProxyService:
             self._report_resolved('storage.reconcile', 'Lưu trạng thái reconciler đã phục hồi')
 
     def run_reconciler(self):
+        self.reconciler_thread = threading.current_thread()
+        self._note_liveness_progress()
         failures = 0
         while not self.stop_event.is_set():
             try:
@@ -1743,6 +1799,7 @@ class ProxyService:
                     self._report_failure('storage.reconcile', 'Lỗi lưu trạng thái worker', persistence_error)
             finally:
                 self.last_reconcile_monotonic = time.monotonic()
+                self._note_liveness_progress()
             try:
                 state = self.store.read()
                 recovering = (state['settings']['startup_rebuild_enabled'] and not state['manual_stop'] and
@@ -1754,4 +1811,5 @@ class ProxyService:
                 self.health_error = type(exc).__name__
                 self._report_failure('storage.reconcile', 'Lỗi đọc trạng thái worker', exc)
                 delay = min(300, 10 * 2**min(failures, 5))
+            self._note_liveness_progress()
             self.stop_event.wait(delay)

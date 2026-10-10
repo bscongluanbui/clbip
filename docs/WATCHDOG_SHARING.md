@@ -76,7 +76,7 @@ HEARTBEAT_ALLOW_HTTP=1
 HEARTBEAT_TOKEN_FILE=/home/ubuntu/clbip-heartbeat/heartbeat_token
 HEARTBEAT_INTERVAL=60
 HEARTBEAT_TIMEOUT=5
-LOCAL_DASHBOARD_URL=http://127.0.0.1:7070/readyz
+LOCAL_DASHBOARD_URL=http://127.0.0.1:7070/heartbeatz
 ```
 
 Chuyển riêng token `WATCHDOG_SHARED_TOKEN` của đúng node sang file
@@ -88,15 +88,21 @@ Có hai cách gửi, **chỉ bật một cách cho mỗi node**:
 
 1. Worker của bản có hỗ trợ `HEARTBEAT_*`: dùng override
    `docker-compose.heartbeat.yml` như [hướng dẫn](TELEGRAM_ALERTS.md).
-2. Agent host cho bản Docker đang ổn định: đặt `scripts/host_heartbeat.py` và
-   `heartbeat.py` trong cùng thư mục, chạy bằng systemd với EnvironmentFile.
-   Agent đọc `/readyz`, không cần Docker socket, mật khẩu dashboard hoặc service
-   token; không restart container hay thay pool.
+2. Agent host: đặt `scripts/host_heartbeat.py` và `heartbeat.py` **cùng phiên bản**
+   trong cùng thư mục, chạy bằng systemd với EnvironmentFile. Agent mới đọc
+   `/heartbeatz` của dashboard mới, không cần Docker socket, mật khẩu dashboard
+   hoặc service token; không restart container hay thay pool. Bản dashboard cũ
+   chưa có endpoint này cần giữ URL `/readyz` và hành vi readiness cũ cho đến khi
+   image mới đã được triển khai.
 
-Agent host chứng minh dashboard/worker trả `ready=true` tại lần kiểm tra mới,
-không chứng minh mọi proxy hay mọi website đều thông. Cảnh báo IPv6 riêng vẫn
-phụ thuộc health/reconciler của worker. Tránh chạy hai sender vào cùng node;
-khi chuyển sang heartbeat trong worker, dừng agent host trước.
+Agent host mới chứng minh dashboard và worker/reconciler còn sống, có progress
+còn mới tại lần kiểm tra `/heartbeatz`; pool/readiness tạm lỗi được báo riêng,
+không làm heartbeat mất dấu server chỉ vì pool đang rebuild. Agent yêu cầu cả
+ba boolean `alive`, `worker_alive`, `progress_fresh` bằng `true`, không dùng
+`/livez` hay kết quả cũ làm fallback. Đây không chứng minh mọi proxy/website đều
+thông. Cảnh báo IPv6 riêng vẫn phụ thuộc health/reconciler của worker. Tránh
+chạy hai sender vào cùng node; khi chuyển sang heartbeat trong worker, dừng
+agent host trước.
 
 ### Cài agent host bằng systemd
 
@@ -194,11 +200,61 @@ journalctl -u clbip-heartbeat.service -n 30 --no-pager
 
 Trạng thái mong đợi là `enabled` và `active`; vẫn cần kiểm tra VPS nhận heartbeat
 mới. Khi sửa file cấu hình, chạy lại lệnh kiểm tra offline rồi
-`sudo systemctl restart clbip-heartbeat.service`. Agent chỉ GET `/readyz` và POST
+`sudo systemctl restart clbip-heartbeat.service`. Agent chỉ GET `/heartbeatz`
+(hoặc `/readyz` nếu chọn legacy rõ ràng) và POST
 heartbeat rỗng; không gọi Docker socket, không sửa mạng, không restart container
 và không đổi pool proxy. Mỗi probe dashboard có timeout socket `(2, 5)` giây,
 giới hạn body 4 KB và thời hạn quan sát 8 giây; probe lỗi/quá hạn không dùng lại
-success cũ để tiếp tục gửi heartbeat.
+success cũ để tiếp tục gửi heartbeat. Ngưỡng progress phía worker là 330 giây,
+độc lập `HEARTBEAT_STALE_AFTER` phía sender; tăng biến sender không che được
+progress stale. Agent dùng cùng retry/cadence với module `heartbeat.py`:
+tối đa 3 lần, backoff 1/2 giây, allowance danh nghĩa 25 giây (không phải hard
+DNS/header deadline); xem [chi tiết](TELEGRAM_ALERTS.md#cấu-hình-worker-tại-nhà).
+
+### Nâng cấp agent host từ `/readyz`
+
+Đây là migration riêng cho **agent Python/systemd trên server được giám sát**.
+`docker compose pull` chỉ tải image; không thay các module agent ở
+`/home/ubuntu/clbip-heartbeat/`. Thực hiện theo thứ tự:
+
+1. Chỉ sau khi image mới đã được triển khai, xác nhận endpoint local trả HTTP
+   `200` với ba cờ boolean bằng `true`. Dùng IP/dashboard port thực tế:
+
+   ```bash
+   curl --noproxy '*' --fail --silent --show-error --max-time 8 \
+     http://127.0.0.1:7070/heartbeatz
+   ```
+
+   Khi worker đã dừng hoặc progress stale, response lỗi không phải bằng chứng
+   để bỏ qua kiểm tra; xử lý worker trước. Nếu image cũ trả `404`, giữ agent/URL
+   cũ cho đến lúc nâng dashboard. Không fallback tự động sang `/livez`.
+
+2. Từ checkout source **cùng release với image mới**, sao lưu và cập nhật cả
+   hai module. Không ghi đè file env/token hoặc dữ liệu VPS:
+
+   ```bash
+   APP=/home/ubuntu/clbip-heartbeat
+   BACKUP=$(mktemp -d "$APP/code-backup.XXXXXX")
+   cp -p "$APP/host_heartbeat.py" "$APP/heartbeat.py" "$BACKUP/"
+   printf 'AGENT_BACKUP=%s\n' "$BACKUP"
+   python3 -B -c 'import scripts.host_heartbeat, heartbeat; print("IMPORTS=OK")'
+   install -m 0644 scripts/host_heartbeat.py heartbeat.py "$APP/"
+   nano "$APP/heartbeat.env"
+   ```
+
+   Giữ mọi biến khác; thay `LOCAL_DASHBOARD_URL` thành
+   `http://127.0.0.1:7070/heartbeatz`. File env đã ghi `/readyz` không tự đổi khi
+   cập nhật source. Chọn explicit `/readyz` vẫn yêu cầu `200` và `ready=true`.
+
+3. Chạy lại lệnh `systemd-run ... --check` ở phần cài agent, rồi restart riêng
+   `sudo systemctl restart clbip-heartbeat.service`. Không cần sửa/restart node
+   receiver VPS vì path/token heartbeat phía VPS không đổi. Kiểm tra journal
+   agent và VPS xác nhận **heartbeat mới**; `--check` chỉ kiểm tra offline.
+
+Nếu cần rollback agent, chép lại **cả hai** module từ thư mục `AGENT_BACKUP`,
+đổi URL về `/readyz` khi dashboard chạy bản cũ, rồi restart dịch vụ agent.
+Giữ nguyên secret, database và queue. Nâng cấp source agent không tự recreate
+container hoặc thay pool proxy; kế hoạch nâng image phải được thực hiện riêng.
 
 ## Kiểm chứng và bảo trì
 

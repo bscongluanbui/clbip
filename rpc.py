@@ -1,5 +1,6 @@
 """Authenticated local IPC. Dashboard never imports or executes network control."""
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -27,9 +28,15 @@ class WorkerClient:
         self.socket_path = socket_path or os.environ.get('WORKER_SOCKET', '/run/ipv6-manager/worker.sock')
         self.token = token if token is not None else read_secret('SERVICE_TOKEN', required=False)
 
-    def call(self, method, params=None):
+    def call(self, method, params=None, *, timeout=None):
         if not isinstance(method, str) or (params is not None and not isinstance(params, dict)):
             raise RpcError('Worker request không hợp lệ', 400)
+        try:
+            timeout_value = float(os.environ.get('WORKER_RPC_TIMEOUT', '600') if timeout is None else timeout)
+            if isinstance(timeout, bool) or not math.isfinite(timeout_value) or timeout_value <= 0:
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            raise RpcError('Worker timeout không hợp lệ', 400) from None
         if len(self.token) < 32:
             raise RpcError('Service token chưa được cấu hình')
         payload = json.dumps({'token': self.token, 'method': method, 'params': params or {}}).encode() + b'\n'
@@ -37,7 +44,7 @@ class WorkerClient:
             raise RpcError('Request quá lớn', 413)
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(float(os.environ.get('WORKER_RPC_TIMEOUT', '600')))
+                sock.settimeout(timeout_value)
                 sock.connect(self.socket_path)
                 sock.sendall(payload)
                 with sock.makefile('rb') as stream:

@@ -91,7 +91,7 @@ class WorkerHandler(socketserver.StreamRequestHandler):
                 report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi RPC worker', 'Response too large')
                 encoded = b'{"ok":false,"status":413,"error":"Worker response too large"}\n'
             self.wfile.write(encoded)
-            if response.get('ok') is True and not response_too_large:
+            if response.get('ok') is True and not response_too_large and method != 'controlplane_liveness':
                 report(self.server.service, '_report_resolved', 'worker.rpc', 'RPC worker đã đáp ứng lại')
         except Exception as exc:
             report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi truyền RPC worker', type(exc).__name__)
@@ -106,16 +106,20 @@ class WorkerServer(socketserver.ThreadingUnixStreamServer):
         self.credentials = credentials
         self.credential_lock, self.credential_attempts = threading.Lock(), []
         self.slots = threading.BoundedSemaphore(32)
+        self.capacity_limited = threading.Event()
         super().__init__(path, WorkerHandler)
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
+            if hasattr(self, "capacity_limited"):
+                self.capacity_limited.set()
             report(getattr(self, 'service', None), '_report_failure', 'worker.rpc_capacity', 'RPC worker đạt giới hạn', '32 simultaneous RPC handlers')
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
-            report(getattr(self, 'service', None), '_report_resolved', 'worker.rpc_capacity', 'RPC worker đã nhận kết nối lại')
+            # Do not block the accept loop on alert SQLite after every probe.
+            # Capacity recovery is reported by a completed handler instead.
         except BaseException:
             self.slots.release()
             raise
@@ -125,6 +129,10 @@ class WorkerServer(socketserver.ThreadingUnixStreamServer):
             super().process_request_thread(request, client_address)
         finally:
             self.slots.release()
+            limited = getattr(self, 'capacity_limited', None)
+            if limited is not None and limited.is_set():
+                limited.clear()
+                report(getattr(self, 'service', None), '_report_resolved', 'worker.rpc_capacity', 'RPC worker đã nhận kết nối lại')
 
 
 def main():
@@ -157,6 +165,7 @@ def main():
     server = WorkerServer(str(path), service, token, credentials=credentials)
     path.chmod(0o660)
     thread = threading.Thread(target=service.run_reconciler, name='network-reconciler', daemon=True)
+    service.reconciler_thread = thread
     thread.start()
     background = []
     if service.alerts is not None:
@@ -172,7 +181,7 @@ def main():
     background.append(dashboard_monitor)
     heartbeat = HeartbeatMonitor()
     def heartbeat_health():
-        snapshot = service.heartbeat_snapshot()
+        snapshot = service.controlplane_liveness()
         snapshot['healthy'] = snapshot['healthy'] and runtime.healthy and thread.is_alive() and all(t.is_alive() for t in background)
         return snapshot
     heartbeat_thread = threading.Thread(target=heartbeat.run,

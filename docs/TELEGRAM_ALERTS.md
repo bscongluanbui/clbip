@@ -9,8 +9,8 @@
    once**: crash sau khi Telegram nhận nhưng trước khi lưu ACK có thể tạo bản
    trùng. Hàng đợi có giới hạn; đây không phải bảo đảm mọi packet/lỗi client của
    mọi website đều được ghi nhận.
-2. **VPS độc lập:** nhận heartbeat từ worker. Khi không nhận trong ngưỡng, VPS
-   dùng Internet và bot Telegram của VPS để báo. Mất điện/router/Internet tại nhà
+2. **VPS độc lập:** nhận heartbeat từ worker hoặc agent host. Khi không nhận
+   trong ngưỡng, VPS dùng Internet và bot Telegram của VPS để báo. Mất điện/router/Internet tại nhà
    không ngăn VPS gửi tin. Heartbeat chỉ xác định **mất dấu mạng/server/worker**,
    không tự chứng minh lỗi do nhà mạng IPv6. Nếu chính VPS hoặc Telegram cũng mất
    mạng, outbox VPS giữ tin và thử lại khi kết nối trở lại.
@@ -136,28 +136,73 @@ và lưu selector `COMPOSE_FILE=docker-compose.yml:docker-compose.heartbeat.yml`
 `.env` hoặc chat/log. Chỉ recreate worker sau khi receiver VPS đã được cấu hình.
 
 Worker mặc định **tắt heartbeat** khi không có URL; không có request ngoại mạng.
-Luồng heartbeat chỉ gửi POST body rỗng khi snapshot worker khỏe và timestamp
-reconciler/progress còn mới. Lỗi hiện tại, dữ liệu stale, lỗi provider hoặc
-worker/reconciler bị treo không được chứng nhận khỏe bằng success cũ. Stop proxy
-chủ động vẫn là worker khỏe nếu không có incident khác. Khi bảo trì/tắt worker,
-tạm dừng receiver/monitor nếu muốn tránh cảnh báo thiếu heartbeat dự kiến.
+Luồng heartbeat chỉ gửi POST body rỗng khi snapshot liveness mới xác nhận
+worker/reconciler còn sống, dashboard đáp ứng và progress chưa stale. Pool đang
+build/reconcile, readiness tạm `false` hoặc incident pool không làm mất heartbeat
+chỉ vì các trạng thái đó; cảnh báo pool/readiness vẫn được gửi riêng qua outbox.
+Dữ liệu stale, lỗi provider hoặc worker/reconciler bị treo không được chứng nhận
+khỏe bằng success cũ. Stop proxy chủ động vẫn là liveness hợp lệ. Khi bảo trì/tắt
+worker, tạm dừng receiver/monitor nếu muốn tránh cảnh báo thiếu heartbeat dự kiến.
 
-Mặc định timestamp stale sau `max(2 × interval, 330)` giây để bao phủ backoff
-reconciler tối đa 300 giây. Lỗi health rõ ràng dừng beat ngay; treo không có lỗi
-rõ ràng có thể cần hết stale rồi đến deadline VPS. Đặt stale thấp hơn cần kiểm
-thử build lớn/backoff, nếu không sẽ tạo cảnh báo giả.
+Control-plane worker dùng ngưỡng cố định **330 giây** cho progress thực của
+reconciler; khi reconciler đang đợi khóa, progress mới của operation đang giữ
+khóa cũng được xét. Ngưỡng này bao phủ poll/backoff tối đa 300 giây. GET heartbeat
+không tự làm mới progress. Từ 330 giây không có progress, `/heartbeatz` trả lỗi
+và `progress_fresh=false`, dù thread vẫn tồn tại.
 
-Timeout request là timeout socket của Requests; DNS resolver hệ điều hành có
-thể mất lâu hơn. Heartbeat chạy một luồng daemon riêng, không khóa hay cản
-reconciler. Không follow redirect, không dùng proxy môi trường, không gửi/log
-URL token, prefix, địa chỉ pool hay credentials. VPS/monitor vẫn phát hiện thiếu
-beat nếu chính request heartbeat bị treo.
+`HEARTBEAT_STALE_AFTER` là ngưỡng bổ sung trong sender `HeartbeatMonitor`, mặc
+định `max(2 × interval, 330)` giây, **không thay** ngưỡng control-plane trên.
+Tăng biến này không khiến worker progress đã stale được xác nhận khỏe. Giảm
+ngưỡng cần kiểm thử build/backoff để tránh cảnh báo giả. Worker/dashboard thực
+sự ngừng đáp ứng dừng beat; pool lỗi được báo riêng. Thời gian phát hiện treo
+có thể cần hết ngưỡng progress rồi đến deadline VPS.
+
+Mỗi chu kỳ gửi tối đa **3 lần**, nghỉ 1 rồi 2 giây trước retry, chỉ retry
+lỗi connection/timeout hoặc HTTP `408`, `429`, `5xx`. Mỗi lần thử đều lấy lại
+snapshot mới; lỗi health không retry gửi bằng success cũ. HTTP `401`/`403` cần
+sửa cấu hình thay vì gửi lặp. Sender giữ nhịp bằng deadline monotonic cố định,
+không cộng trọn interval sau mỗi request; tick đã lỡ được bỏ qua, không gửi dồn.
+
+Allowance của một chu kỳ là **25 giây**, dùng để quyết định retry và giảm timeout
+socket theo thời gian còn lại, **không phải hard deadline** cho DNS hệ điều hành
+hoặc response headers nhỏ giọt. Requests timeout vẫn là timeout từng phase
+connect/read. Ưu tiên IP Tailscale literal ở URL receiver để tránh DNS cho đường
+heartbeat. Luồng daemon sender riêng không khóa/cản reconciler. Sender không
+follow redirect, không dùng proxy môi trường, không gửi/log URL token, prefix,
+địa chỉ pool hay credentials. VPS vẫn phát hiện thiếu beat nếu request bị treo.
 
 Với interval 60 giây và deadline VPS 180 giây, cảnh báo thiếu beat xuất hiện
 xấp xỉ **120–180 giây sau mất kết nối**, cộng tối đa chu kỳ kiểm tra 5 giây và
 thời gian Telegram. Thời gian thực tế còn phụ thuộc kết nối VPS/Telegram. Nếu
 worker treo nhưng heartbeat vẫn mới vài phút, thời gian phát hiện còn cộng
 stale limit. Đây không phải cảnh báo tức thời hoặc cam kết không mất tin.
+
+## Tách heartbeat của agent host khỏi readiness
+
+Agent host mới mặc định GET `http://127.0.0.1:7070/heartbeatz`. Endpoint này là
+observation nhẹ, không đợi khóa thao tác pool hay chạy kiểm tra DNS/egress. Chỉ
+HTTP `200` và cả ba giá trị JSON **boolean** `alive=true`, `worker_alive=true`,
+`progress_fresh=true` mới được gửi heartbeat. `ready=false` khi worker đang đồng
+bộ pool không làm mất dấu server; `/readyz` vẫn là readiness sâu, kiểm tra riêng.
+`/livez` chỉ chứng minh web app và không được dùng làm fallback.
+
+Cấu hình `LOCAL_DASHBOARD_URL` đã lưu `/readyz` vẫn giữ hành vi cũ: phải có HTTP
+`200` và `ready=true`. Agent không tự thay URL hoặc chấp nhận response `503`.
+Do đó cần **migration chủ động sau khi dashboard/image mới có `/heartbeatz`**.
+Không đổi URL sang endpoint mới trên image cũ; `404` sẽ dừng heartbeat.
+
+`docker compose pull` không cập nhật agent Python/systemd ngoài container. Khi
+chuyển native agent, lấy source release tương ứng, sao lưu rồi chép **cả**
+`scripts/host_heartbeat.py` và `heartbeat.py` vào `/home/ubuntu/clbip-heartbeat/`.
+Giữ nguyên `heartbeat.env`, `heartbeat_token`, unit và dữ liệu watchdog trên VPS;
+đổi duy nhất URL local sang `/heartbeatz`, kiểm tra offline rồi restart riêng
+`clbip-heartbeat.service`. Các bước nằm trong [hướng dẫn chia sẻ](WATCHDOG_SHARING.md#nâng-cấp-agent-host-từ-readyz).
+
+Mỗi probe luôn là request mới, body tối đa 4 KB, deadline quan sát 8 giây và tối
+đa một request đang chạy. Response muộn/lỗi không được tái sử dụng. Log đổi trạng
+thái phân biệt `liveness`/`readiness`, lỗi worker/progress với lỗi HTTP/transport;
+log không chứa URL hay token. Thiếu heartbeat vẫn có thể do sender, đường
+Tailscale hoặc VPS; tín hiệu này không tự xác định lỗi ISP.
 
 ## Healthchecks.io (tùy chọn thay receiver VPS)
 

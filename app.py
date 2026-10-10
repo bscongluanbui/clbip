@@ -81,7 +81,7 @@ def create_app(config=None, client=None):
 
     @app.before_request
     def check_auth():
-        if request.endpoint in ('static', 'live', 'ready'):
+        if request.endpoint in ('static', 'live', 'ready', 'heartbeat_liveness'):
             return None
         if not configured():
             return jsonify(success=False, error='Dashboard secrets chưa được cấu hình'), 503
@@ -122,7 +122,7 @@ def create_app(config=None, client=None):
         response.headers.update({'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
                                  'Referrer-Policy': 'no-referrer',
                                  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"})
-        if request.path.startswith('/api/') or request.path in ('/login', '/'):
+        if request.path.startswith('/api/') or request.path in ('/login', '/', '/heartbeatz'):
             response.headers['Cache-Control'] = 'no-store'
         if request.is_secure:
             response.headers['Strict-Transport-Security'] = 'max-age=31536000'
@@ -190,6 +190,24 @@ def create_app(config=None, client=None):
     @app.get('/livez')
     def live():
         return jsonify(alive=True)
+
+    @app.get('/heartbeatz')
+    def heartbeat_liveness():
+        # Public booleans only. No pool addresses, credentials, error text, or
+        # deep NIC/egress readiness checks enter this cheap observation.
+        flags = {'alive': True, 'worker_alive': False, 'progress_fresh': False}
+        if not configured():
+            return jsonify(flags), 503
+        try:
+            snapshot = worker.call('controlplane_liveness', timeout=2)
+        except RpcError:
+            return jsonify(flags), 503
+        if not isinstance(snapshot, dict):
+            return jsonify(flags), 503
+        flags['worker_alive'] = snapshot.get('reconciler_alive') is True
+        flags['progress_fresh'] = snapshot.get('progress_fresh') is True
+        healthy = snapshot.get('healthy') is True and all(flags.values())
+        return jsonify(flags), 200 if healthy else 503
 
     @app.get('/readyz')
     def ready():

@@ -5,10 +5,35 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from heartbeat import HeartbeatMonitor, validate_heartbeat_url
 
 
 URL = 'https://hc-ping.com/11111111-2222-3333-4444-555555555555'
+
+
+class FakeStop:
+    """Deterministic event: each wait advances an injected monotonic clock."""
+    def __init__(self, advance, *, stop_on_wait=None):
+        self.advance = advance
+        self.stop_on_wait = stop_on_wait
+        self.waits = []
+        self.stopped = False
+
+    def is_set(self):
+        return self.stopped
+
+    def set(self):
+        self.stopped = True
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        if self.stop_on_wait is not None and len(self.waits) >= self.stop_on_wait:
+            self.stopped = True
+        else:
+            self.advance(seconds)
+        return self.stopped
 
 
 class HeartbeatTests(unittest.TestCase):
@@ -23,6 +48,11 @@ class HeartbeatTests(unittest.TestCase):
         return HeartbeatMonitor({'HEARTBEAT_URL': URL, **(env or {})},
                                 session=self.session, monotonic=lambda: self.now,
                                 logger=self.logger)
+
+    def stop(self, *, stop_on_wait=None):
+        def advance(seconds):
+            self.now += seconds
+        return FakeStop(advance, stop_on_wait=stop_on_wait)
 
     def healthy(self):
         return {'healthy': True, 'last_reconcile_monotonic': self.now}
@@ -88,7 +118,7 @@ class HeartbeatTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.response.status_code = code
                 monitor = self.monitor()
-                self.assertEqual(monitor.emit_once(self.healthy), 'http_error')
+                self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'http_error')
                 self.assertEqual(monitor.successes, 0)
         self.response.json.assert_not_called()
         self.response.iter_content.assert_not_called()
@@ -220,6 +250,182 @@ class HeartbeatTests(unittest.TestCase):
         self.session.post.assert_not_called()
         self.assertEqual(monitor.last_result, 'stopped')
         self.assertEqual(monitor.attempts, 0)
+
+
+    def test_transient_transport_retry_recovers_and_rechecks_health(self):
+        monitor = self.monitor()
+        self.session.post.side_effect = [requests.exceptions.Timeout(URL), self.response]
+        provider = Mock(side_effect=self.healthy)
+        stop = self.stop()
+        self.assertEqual(monitor.emit_once(provider, stop), 'sent')
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(stop.waits, [1.0])
+        self.assertEqual(monitor.attempts, 2)
+        self.assertEqual(monitor.retries, 1)
+        self.assertEqual(monitor.successes, 1)
+        self.assertEqual(monitor.last_http_status, 200)
+        self.response.close.assert_called_once()
+
+    def test_retryable_http_statuses_retry_but_close_each_response(self):
+        for code in (408, 429, 500, 503, 599):
+            with self.subTest(code=code):
+                monitor = self.monitor()
+                rejected = Mock(status_code=code)
+                accepted = Mock(status_code=204)
+                self.session.post.side_effect = [rejected, accepted]
+                self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'sent')
+                self.assertEqual(monitor.attempts, 2)
+                self.assertEqual(monitor.retries, 1)
+                self.assertEqual(monitor.last_http_status, 204)
+                rejected.close.assert_called_once()
+                accepted.close.assert_called_once()
+                rejected.iter_content.assert_not_called()
+                rejected.json.assert_not_called()
+
+    def test_permanent_http_errors_and_redirects_never_retry(self):
+        for code in (301, 302, 307, 400, 401, 403, 404, 409):
+            with self.subTest(code=code):
+                self.session.post.reset_mock()
+                self.response.status_code = code
+                monitor = self.monitor()
+                stop = self.stop()
+                self.assertEqual(monitor.emit_once(self.healthy, stop), 'http_error')
+                self.assertEqual(self.session.post.call_count, 1)
+                self.assertEqual(stop.waits, [])
+                self.assertEqual(monitor.retries, 0)
+                self.assertEqual(monitor.last_http_status, code)
+
+    def test_transport_failure_exhausts_three_attempts_without_real_sleep(self):
+        monitor = self.monitor()
+        self.session.post.side_effect = requests.exceptions.ConnectionError(URL)
+        stop = self.stop()
+        self.assertEqual(monitor.emit_once(self.healthy, stop), 'transport_error')
+        self.assertEqual(self.session.post.call_count, 3)
+        self.assertEqual(stop.waits, [1.0, 2.0])
+        self.assertEqual(monitor.retries, 2)
+        self.assertEqual(monitor.successes, 0)
+        self.assertIsNone(monitor.last_http_status)
+
+    def test_unhealthy_or_stale_before_retry_suppresses_second_post(self):
+        for reason in ('unhealthy', 'stale', 'health_unavailable'):
+            with self.subTest(reason=reason):
+                self.session.post.reset_mock()
+                monitor = self.monitor()
+                self.session.post.side_effect = requests.exceptions.Timeout(URL)
+                states = [self.healthy(),
+                          {'healthy': False} if reason == 'unhealthy' else
+                          {'healthy': True, 'last_reconcile_monotonic': self.now - 400}
+                          if reason == 'stale' else {'healthy': True}]
+                provider = Mock(side_effect=states)
+                self.assertEqual(monitor.emit_once(provider, self.stop()), reason)
+                self.assertEqual(self.session.post.call_count, 1)
+                self.assertEqual(provider.call_count, 2)
+                self.assertEqual(monitor.retries, 0)
+
+    def test_stop_during_backoff_suppresses_retry(self):
+        monitor = self.monitor()
+        self.session.post.side_effect = requests.exceptions.Timeout(URL)
+        stop = self.stop(stop_on_wait=1)
+        self.assertEqual(monitor.emit_once(self.healthy, stop), 'stopped')
+        self.assertEqual(self.session.post.call_count, 1)
+        self.assertEqual(monitor.retries, 0)
+        self.assertEqual(stop.waits, [1.0])
+
+    def test_cycle_budget_caps_configured_timeout_and_skips_late_retry(self):
+        monitor = self.monitor({'HEARTBEAT_TIMEOUT': '30'})
+        timeouts = []
+        def post(*args, **kwargs):
+            timeout = kwargs['timeout']
+            timeouts.append(timeout)
+            self.now += timeout * 2
+            raise requests.exceptions.Timeout(URL)
+        self.session.post.side_effect = post
+        stop = self.stop()
+        self.assertEqual(monitor.emit_once(self.healthy, stop), 'transport_error')
+        self.assertEqual(timeouts, [12.5])
+        self.assertEqual(stop.waits, [])
+        self.assertEqual(monitor.attempts, 1)
+        self.assertEqual(monitor.status()['cycle_budget_seconds'], 25.0)
+
+    def test_remaining_cycle_budget_reduces_final_request_timeout(self):
+        monitor = self.monitor()
+        timeouts = []
+        def post(*args, **kwargs):
+            timeout = kwargs['timeout']
+            timeouts.append(timeout)
+            self.now += timeout * 2
+            raise requests.exceptions.Timeout(URL)
+        self.session.post.side_effect = post
+        stop = self.stop()
+        self.assertEqual(monitor.emit_once(self.healthy, stop), 'transport_error')
+        self.assertEqual(timeouts, [5.0, 5.0, 1.0])
+        self.assertEqual(stop.waits, [1.0, 2.0])
+        self.assertEqual(self.now, 1025.0)
+
+    def test_fixed_monotonic_cadence_does_not_add_request_duration(self):
+        monitor = self.monitor()
+        starts = []
+        stop = self.stop()
+        def post(*args, **kwargs):
+            starts.append(self.now)
+            self.now += 8.0
+            if len(starts) == 3:
+                stop.set()
+            return self.response
+        self.session.post.side_effect = post
+        monitor.run(stop, self.healthy)
+        self.assertEqual(starts, [1000.0, 1060.0, 1120.0])
+        self.assertEqual(stop.waits, [52.0, 52.0])
+        self.assertEqual(monitor.cycles, 3)
+        self.session.close.assert_called_once()
+
+    def test_long_overrun_skips_missed_ticks_without_tight_loop(self):
+        monitor = self.monitor()
+        starts = []
+        stop = self.stop()
+        def post(*args, **kwargs):
+            starts.append(self.now)
+            self.now += 185.0
+            if len(starts) == 2:
+                stop.set()
+            return self.response
+        self.session.post.side_effect = post
+        monitor.run(stop, self.healthy)
+        self.assertEqual(starts, [1000.0, 1240.0])
+        self.assertEqual(stop.waits, [55.0])
+        self.assertEqual(monitor.attempts, 2)
+
+    def test_logs_show_transitions_and_http_status_without_secrets(self):
+        token = 'VERY_SECRET_TOKEN_' + 'x' * 32
+        monitor = self.monitor({'HEARTBEAT_TOKEN': token})
+        self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'sent')
+        self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'sent')
+        self.assertEqual(self.logger.info.call_count, 1)
+        self.response.status_code = 401
+        self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'http_error')
+        self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'http_error')
+        self.assertEqual(self.logger.info.call_count, 2)
+        self.session.post.side_effect = requests.exceptions.Timeout(URL + token)
+        self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'transport_error')
+        log = str(self.logger.mock_calls)
+        self.assertIn('http_status=%s', log)
+        self.assertIn('401', log)
+        self.assertNotIn(URL, log)
+        self.assertNotIn(token, log)
+        self.assertNotIn(URL, str(monitor.status()))
+        self.assertNotIn(token, str(monitor.status()))
+
+
+    def test_slow_snapshot_budget_expiry_does_not_report_previous_success(self):
+        monitor = self.monitor()
+        self.assertEqual(monitor.emit_once(self.healthy, self.stop()), 'sent')
+        self.session.post.reset_mock()
+        def provider():
+            self.now += 26.0
+            return self.healthy()
+        self.assertEqual(monitor.emit_once(provider, self.stop()), 'cycle_budget_exhausted')
+        self.session.post.assert_not_called()
+        self.assertEqual(monitor.successes, 1)
 
 
 if __name__ == '__main__':
