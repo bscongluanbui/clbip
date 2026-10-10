@@ -13,35 +13,73 @@ Dashboard quản lý HTTP/SOCKS5 proxy với 3proxy. Địa chỉ được chọ
 
 **Môi trường mục tiêu:** Docker Engine + Compose trên Linux có NIC kết nối trực tiếp router và IPv6 hoạt động. Docker Desktop host-network chỉ cung cấp một số chức năng L4; không đồng nghĩa với quyền quản lý NIC/L2 của Windows/macOS host. Xem [Docker host-network limitations](https://docs.docker.com/engine/network/drivers/host/#limitations).
 
+Cần có **Git, Bash, Python 3, Docker Engine đang chạy và Docker Compose v2** (`docker compose version`). Installer kiểm tra Linux/Python/Docker/Compose, không tự cài Docker/Python hoặc thay đổi mạng host. Chạy trên máy Linux mục tiêu:
+
 ```bash
-git clone https://github.com/bscongluanbui/clbip.git
-cd clbip
-python3 scripts/init_secrets.py --no-dashboard-password
-# Bỏ --no-dashboard-password nếu muốn tạo mật khẩu đăng nhập ban đầu.
-# Script giữ nguyên tất cả secrets đã tồn tại.
-docker compose config --quiet
-docker compose pull
-docker compose up -d --no-build
-# Tùy chọn: bật chỉnh trần thread trực tiếp từ dashboard trên Linux cgroup v2.
-sudo bash scripts/install_host_controller.sh "$PWD/docker-compose.yml"
+git clone https://github.com/bscongluanbui/clbip.git /home/ubuntu/clbip
+cd /home/ubuntu/clbip
+bash scripts/install.sh
+```
+
+Nếu đã clone vào `/home/ubuntu/clbip`, chỉ `cd /home/ubuntu/clbip` rồi chạy installer; không clone lồng thêm thư mục `clbip`. Nếu Docker báo `permission denied` khi truy cập daemon, hoặc checkout đã thuộc root nên ghi `.env`/`secrets` bị từ chối, chạy lại **cùng tham số** với `sudo bash scripts/install.sh`.
+
+Installer tạo **chỉ những secrets còn thiếu**, giữ nguyên secrets đã có, kiểm tra Compose/bind/port, pull image rồi khởi động hai container và đợi healthcheck. Cài mới mặc định không đặt mật khẩu dashboard; có thể đặt mật khẩu trong UI. Nếu muốn bootstrap bằng mật khẩu ngẫu nhiên, chạy `python3 scripts/init_secrets.py` trước installer. Không cần chạy `cp .env.example .env`: installer lưu cấu hình cần thiết trong `.env`, giữ nguyên các mục cấu hình khác.
+
+### Cài trên LAN / lỗi pull GHCR
+
+Mặc định dashboard chỉ nghe loopback. Để dashboard nghe trên **mọi địa chỉ IPv4 của server** (`0.0.0.0:7070`) và truy cập tại **`http://192.168.1.3:7070`**:
+
+```bash
+cd /home/ubuntu/clbip
+sudo bash scripts/install.sh --bind 0.0.0.0 --port 7070
+```
+
+Nếu GHCR báo `denied`, `unauthorized`, image/tag chưa publish hoặc `no matching manifest`, installer dừng và báo lỗi; **không tự âm thầm chuyển sang build local**. Kiểm tra quyền pull/tag/kiến trúc theo tài liệu registry bên dưới, hoặc chủ động build từ checkout hiện tại:
+
+```bash
+sudo bash scripts/install.sh --build --bind 0.0.0.0 --port 7070
+```
+
+`--build` cần truy cập Internet cho base image, dependencies và source 3proxy; nó bỏ bước pull image ứng dụng từ GHCR, không thay thế Docker Engine/Compose.
+
+| Tham số installer | Ý nghĩa |
+|---|---|
+| `--check` | Kiểm tra điều kiện cài đặt/cấu hình; không ghi `.env`/secrets, không pull/build/start/stop container |
+| `--build` | Build image `ipv6-proxy-manager:local` và lưu chế độ build cho lần chạy sau |
+| `--bind IP` | Lưu `GUI_BIND`; IP phải thuộc host, hoặc địa chỉ wildcard; mặc định `127.0.0.1` |
+| `--port PORT` | Lưu `GUI_PORT`, số nguyên `1024..65535`; mặc định `7070` |
+| `--wait-timeout SECONDS` | Giới hạn thời gian đợi dịch vụ sẵn sàng sau `compose up`, `1..3600` giây; mặc định `120` |
+| `--host-controller` | Sau khi dịch vụ sẵn sàng, cài controller chỉnh trần thread trên Linux cgroup v2; bước này dùng sudo khi cần |
+
+Kiểm tra trước khi cài, không thay đổi deployment:
+
+```bash
+sudo bash scripts/install.sh --check --bind 0.0.0.0 --port 7070
 ```
 
 Compose mặc định dùng **`ghcr.io/bscongluanbui/clbip:latest`**. GitHub Actions được thiết kế để build/test cả **Linux amd64, arm64 và arm/v7**, rồi ghép một tag đa kiến trúc sau khi cả ba job đạt gate. Docker chọn kiến trúc khi pull; Armbian `aarch64` dùng `linux/arm64`, không cần sửa Compose sang tag riêng. Chỉ dùng tag sau khi workflow publish thành công và package GHCR có quyền pull phù hợp; repository Public không tự làm package Public. Xem [hướng dẫn Armbian/registry](docs/CONTAINER_RELEASE.md#armbian-và-chọn-kiến-trúc).
 
-Lần cập nhật tiếp theo dùng:
+Lần cập nhật tiếp theo chạy trong **cùng checkout**:
 
 ```bash
-docker compose pull
-docker compose up -d --no-build
+cd /home/ubuntu/clbip
+git pull --ff-only
+bash scripts/install.sh
 python3 scripts/doctor.py
 ```
 
-Giữ project name `ipv6-proxy-manager`, ba named volumes và thư mục `secrets`; cập nhật container không xóa settings, proxy pool đã lưu hoặc mật khẩu dashboard. Xem [container release, build local và rollback](docs/CONTAINER_RELEASE.md) để pin tag/digest hoặc cập nhật file Compose khi có thay đổi cấu hình triển khai.
+Installer giữ project name `ipv6-proxy-manager`, ba named volumes, thư mục `secrets` và cấu hình `.env`; không dùng `down --volumes` hoặc xóa dữ liệu. Chế độ build local đã lưu cũng được giữ: lần chạy installer tiếp theo rebuild source hiện tại, không quay lại pull GHCR. Container có thể được recreate khi cập nhật nên listener có thể gián đoạn ngắn; cơ chế phục hồi/tạo lại pool vẫn theo settings đã lưu. Không ghi đè `.env` bằng `.env.example` trên deployment đã có. Xem [container release, build local và rollback](docs/CONTAINER_RELEASE.md) để pin tag/digest hoặc cập nhật file Compose khi có thay đổi cấu hình triển khai.
+
+Lệnh doctor mặc định chọn Compose base; **khi dùng build local**, chọn cả hai file để báo cáo đúng cấu hình (installer cũng in lệnh chẩn đoán tương ứng):
+
+```bash
+python3 scripts/doctor.py --compose-file docker-compose.yml --compose-file docker-compose.build.yml
+```
 
 Truy cập qua SSH tunnel:
 
 ```bash
-ssh -L 7070:127.0.0.1:7070 ACCOUNT@LINUX_HOST
+ssh -N -L 7070:127.0.0.1:7070 ubuntu@192.168.1.3
 ```
 
 Mở `http://127.0.0.1:7070`. Dashboard mở trực tiếp nếu không đặt mật khẩu; nếu đã đặt, đăng nhập bằng mật khẩu đó. Mật khẩu tùy chọn, không ép độ dài hay ký tự đặc biệt; có thể đổi hoặc để trống để tắt đăng nhập trong dashboard. Volume credential đã khởi tạo sẽ giữ mật khẩu qua các lần update; thay bootstrap secret không ghi đè volume này. File secrets không được đưa vào Git/image/build context; trên Linux thư mục host `secrets` có mode `0700`. File-backed Compose secrets giữ quyền file host; script tạo file `0444` để user dashboard non-root đọc được trong container. Giữ nguyên `secret_key` và `service_token` qua các lần cập nhật.
@@ -49,11 +87,20 @@ Mở `http://127.0.0.1:7070`. Dashboard mở trực tiếp nếu không đặt m
 ### Build local / phát triển
 
 ```bash
+bash scripts/install.sh --build
+# Installer lưu COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml
+# và IPV6_MANAGER_IMAGE=ipv6-proxy-manager:local trong .env.
+docker compose config --quiet
+```
+
+`docker compose` chạy từ checkout này sẽ dùng override build đã lưu; giữ `.env` để không mất chế độ build khi cập nhật. Nếu chỉ muốn chạy thủ công với override mà không lưu chế độ trong `.env`:
+
+```bash
 docker compose -f docker-compose.yml -f docker-compose.build.yml build
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --no-build
 ```
 
-Override có chủ đích dùng image `ipv6-proxy-manager:local` và không pull GHCR; không tự áp dụng vào deployment production.
+Override có chủ đích dùng image `ipv6-proxy-manager:local` và không pull GHCR. Muốn quay lại image registry, sửa `.env`: đặt `COMPOSE_FILE=docker-compose.yml` và `IPV6_MANAGER_IMAGE` thành tag/digest đã publish, rồi chạy installer không có `--build`. Không chỉ đổi image trong khi vẫn giữ override build vì override vẫn chọn image local.
 
 ### Lưu settings và trần thread
 
@@ -62,7 +109,7 @@ Override có chủ đích dùng image `ipv6-proxy-manager:local` và không pull
 - Dashboard hiển thị thread đang dùng/trần cgroup thực tế, setting được yêu cầu, số lần chạm trần mới, ESTABLISHED/CLOSE-WAIT, FD và RAM. Snapshot tài nguyên cache 5 giây; thông tin thiếu hiện là chưa quan sát. Cảnh báo 80%/90% chỉ là cảnh báo, không tự restart hoặc tạo lại pool.
 - Setting `thread_limit` mặc định **4096**, khoảng **256..16384**. Khi host controller đã cài, nút riêng áp dụng ngay bằng Docker update, không restart engine/container. Giảm trần cần còn ít nhất 64 task dự phòng theo tải hiện tại.
 - Host controller chỉ nhận `status`, `set_limit`, rollback giới hạn cho worker cố định; chạy trên host qua systemd và Unix socket trong volume runtime sẵn có. Dashboard/container không nhận Docker socket. Giới hạn mới được lưu vào `WORKER_THREAD_LIMIT` trong `.env`; Compose dùng `${WORKER_THREAD_LIMIT:-4096}` để giữ trần qua lần recreate sau.
-- Với deployment đã có: cập nhật checkout/Compose, chạy lại installer host controller, sau đó `docker compose pull && docker compose up -d --no-build`. Pull image không tự cập nhật Compose hay script host. Installer giữ nguyên secrets, dữ liệu và container đang chạy; phần `compose up` có thể tái tạo container nên thực hiện ở thời điểm chấp nhận ngắt kết nối ngắn.
+- Với deployment đã có: cập nhật checkout/Compose rồi chạy `bash scripts/install.sh --host-controller` để cập nhật dịch vụ theo chế độ image/build đã lưu và cài lại controller. Pull image không tự cập nhật Compose hay script host. Installer giữ nguyên secrets và dữ liệu; phần `compose up` có thể tái tạo container nên thực hiện ở thời điểm chấp nhận ngắt kết nối ngắn.
 - Kiểm tra controller: `sudo systemctl status clbip-host-controller --no-pager`. Chế độ chỉnh trần trực tiếp hiện dùng Linux cgroup v2; telemetry cũng đọc được cgroup v1. CLOSE-WAIT riêng lẻ không xác nhận leak; theo dõi vòng đời và áp lực tài nguyên trước khi thay timeout.
 
 ### Cấu hình mạng trước khi tạo proxy
@@ -96,19 +143,21 @@ Bản nâng cấp Linux/Docker: [cải tiến batch, dashboard và vận hành](
 
 ## Cấu hình triển khai
 
+Các biến dưới đây được Compose đọc từ `.env` hoặc môi trường shell. Khi chạy `docker compose` trực tiếp, môi trường shell có ưu tiên cao hơn `.env`. Riêng installer ưu tiên tham số rõ ràng (`--bind`, `--port`, `--build`), rồi các selector đã lưu trong `.env` (`GUI_BIND`, `GUI_PORT`, `IPV6_MANAGER_IMAGE`), rồi môi trường shell hoặc mặc định; `COMPOSE_FILE` luôn lấy từ lựa chọn build hoặc `.env`/file base, không lấy từ shell. [.env.example](.env.example) là mẫu tham khảo, không chứa secrets. Installer lưu bind/port và lựa chọn build khi được yêu cầu; không ghi đè các giá trị khác.
+
 | Biến | Mặc định / nghĩa |
 |---|---|
 | `IPV6_MANAGER_IMAGE` | `ghcr.io/bscongluanbui/clbip:latest`; có thể pin tag hoặc digest trong `.env` |
+| `COMPOSE_FILE` | Không đặt thì Compose tìm `docker-compose.yml`; `--build` lưu `docker-compose.yml:docker-compose.build.yml` trên Linux |
 | `GUI_BIND` | `127.0.0.1`; mở LAN chỉ khi đã có ACL/firewall/TLS phù hợp |
 | `GUI_PORT` | `7070`; healthcheck và bot dùng cùng port |
-| `ADMIN_PASSWORD_FILE` | `/run/secrets/admin_password` |
-| `SECRET_KEY_FILE` | `/run/secrets/secret_key`, persistent |
-| `SERVICE_TOKEN_FILE` | `/run/secrets/service_token`, cả dashboard/worker |
-| `WORKER_SOCKET` | `/run/ipv6-manager/worker.sock` |
+| `WORKER_THREAD_LIMIT` | `4096`; trần task của worker, được host controller lưu sau khi thay đổi |
 | `TELEGRAM_ENABLED` | `0`; đặt `1` rồi cấu hình bot token/chat ID/user IDs |
 | `TELEGRAM_ALLOWED_USER_IDS` | Override allowlist bằng danh sách số, cách dấu phẩy |
 | `DNS_CACHE_ENABLED` | `0`; optional DNS cache loopback port `5353` trên worker |
 | `SESSION_COOKIE_SECURE` | `0` cho localhost HTTP; đặt `1` khi truy cập HTTPS |
+
+Các đường dẫn runtime `ADMIN_PASSWORD_FILE=/run/secrets/admin_password`, `SECRET_KEY_FILE=/run/secrets/secret_key`, `SERVICE_TOKEN_FILE=/run/secrets/service_token` và `WORKER_SOCKET=/run/ipv6-manager/worker.sock` được cố định trong Compose, không phải biến override qua `.env`. Secrets thực tế nằm trong thư mục `secrets` trên host và được mount vào container; không đưa giá trị password/token/secret key vào `.env.example` hoặc Git.
 
 DNS cache tùy chọn: bật `DNS_CACHE_ENABLED=1`, kiểm tra `127.0.0.1:5353` không xung đột, sau đó đặt DNS Primary trong dashboard thành `127.0.0.1:5353`. Không ghi `/etc/dnsmasq.conf`, không chiếm port `53`, không đổi host resolver.
 
@@ -128,9 +177,40 @@ Dashboard **Công cụ → Tạo lại proxy khi khởi động** cho phép đ�
 node tests/test_frontend.js
 python3 -m unittest discover -s tests -v
 bash -n start.sh
+bash -n scripts/install.sh
 docker compose config --quiet
 docker compose logs --tail=100 worker dashboard
 ```
+
+### Chẩn đoán sau khi clone / dashboard không mở
+
+Chạy tại checkout trên server; thêm `sudo` trước các lệnh cần truy cập Docker nếu tài khoản chưa có quyền dùng daemon:
+
+```bash
+cd /home/ubuntu/clbip
+bash scripts/install.sh --check
+docker compose ps --all
+docker compose logs --tail=100 worker dashboard
+python3 scripts/doctor.py
+sudo ss -ltnp 'sport = :7070'
+```
+
+Nếu deployment dùng `--build`, thay lệnh doctor trong khối trên bằng `python3 scripts/doctor.py --compose-file docker-compose.yml --compose-file docker-compose.build.yml`. Installer đọc chế độ build đã lưu, còn doctor cần chọn override rõ ràng khi chạy riêng.
+
+- **Chỉ clone chưa chạy dịch vụ:** installer sẽ tạo secrets thiếu và chạy Compose; không chạy trực tiếp `python app.py` trên host.
+- **Docker daemon/Compose thiếu hoặc permission denied:** kiểm tra `docker info` và `docker compose version`; dùng `sudo bash scripts/install.sh` nếu daemon cần quyền sudo.
+- **Pull GHCR lỗi:** kiểm tra tag, quyền package và kiến trúc; `--build` là lựa chọn chủ động như hướng dẫn trên, không xóa secrets/volumes để sửa lỗi pull.
+- **Bind/port không đúng:** dashboard mặc định chỉ nghe loopback; dùng tunnel nếu giữ mặc định, hoặc chạy `sudo bash scripts/install.sh --bind 0.0.0.0 --port 7070` để nghe mọi địa chỉ IPv4 của server và mở `http://192.168.1.3:7070` từ LAN. Nếu port đã thuộc process khác, xem chủ listener bằng `ss`; chọn port còn trống thay vì dừng process đó.
+- **Compose báo unhealthy nhưng trang còn mở:** phân biệt endpoint bên dưới; xem worker RPC, permissions, recovery/IPv6 và lỗi trong báo cáo doctor. Nếu router/prefix chưa phục hồi, dashboard login/status vẫn có thể dùng được.
+
+Với bind LAN ở ví dụ trên:
+
+```bash
+curl --noproxy '*' -i http://192.168.1.3:7070/livez
+curl --noproxy '*' -i http://192.168.1.3:7070/readyz
+```
+
+Nếu giữ bind mặc định, thay host URL bằng `127.0.0.1` và chạy trên server hoặc qua SSH tunnel. **`/livez` trả HTTP 200 với `{"alive":true}`** khi dashboard đáp ứng; kết quả này chưa chứng minh worker/proxy hoạt động. **`/readyz` trả HTTP 200 với `{"ready":true}`** chỉ khi dashboard có secrets cần thiết, gọi được RPC worker và health worker ready; HTTP 503 với `{"ready":false}` biểu thị chưa sẵn sàng. Docker healthcheck dùng `/readyz`, nên worker đang recovery, RPC lỗi hoặc IPv6/listener chưa ready có thể làm dashboard unhealthy dù `/livez` vẫn đạt. Installer đợi health trong thời gian giới hạn; lỗi/timeout không được báo là cài thành công.
 
 [Linux acceptance / benchmark](docs/LINUX_ACCEPTANCE.md) · [Build provenance / SBOM](docs/BUILD_PROVENANCE.md) · [Operational checklist](docs/OPERATIONS.md)
 

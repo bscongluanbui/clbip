@@ -41,6 +41,10 @@ services:
     user: "10001:10001"
     environment:
       APP_ROLE: dashboard
+      # Gunicorn 26 enables a control socket under HOME by default. Keep the
+      # optional control server disabled on the read-only runtime filesystem,
+      # including when deploying an already-published image.
+      GUNICORN_CMD_ARGS: "--no-control-socket"
       GUI_BIND: "${GUI_BIND:-127.0.0.1}"
       GUI_PORT: "${GUI_PORT:-7070}"
       WORKER_SOCKET: /run/ipv6-manager/worker.sock
@@ -60,7 +64,7 @@ services:
       # a power outage. Readiness still stays false until all proxies are ready.
       worker: {condition: service_started}
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('GUI_PORT','7070')+'/readyz',timeout=3).close()"]
+      test: [CMD, python, -c, "import urllib.request,os; h=os.getenv('GUI_BIND','127.0.0.1'); h={'0.0.0.0':'127.0.0.1','::':'::1'}.get(h,h); h='['+h+']' if ':' in h else h; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://'+h+':'+os.getenv('GUI_PORT','7070')+'/readyz',timeout=3).close()"]
       interval: 30s
       timeout: 5s
       retries: 3
