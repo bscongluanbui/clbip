@@ -52,6 +52,7 @@ jobs:
           node tests/test_diagnostics_frontend.js
           bash -n start.sh
           bash -n scripts/install_host_controller.sh
+          bash -n scripts/install.sh
           docker compose config --quiet
       - name: Install exact dependency artifacts
         run: |
