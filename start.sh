@@ -18,7 +18,8 @@ case "$APP_ROLE" in
   dashboard)
     python -c "from rpc import read_secret; import sys; bad=[n for n in ('SECRET_KEY','SERVICE_TOKEN') if len(read_secret(n)) < 32]; sys.exit('Missing/short deployment secrets: '+', '.join(bad) if bad else 0)"
     [[ "$GUI_PORT" =~ ^[0-9]+$ ]] && (( GUI_PORT >= 1024 && GUI_PORT <= 65535 ))
-    gunicorn --workers 1 --threads 8 --worker-class gthread \
+    # Gunicorn's optional control socket defaults to $HOME on a read-only root.
+    gunicorn --no-control-socket --workers 1 --threads 8 --worker-class gthread \
       --bind "${GUI_BIND}:${GUI_PORT}" --timeout 300 --graceful-timeout 30 \
       --worker-tmp-dir /tmp --access-logfile - --error-logfile - app:app &
     children+=("$!")
@@ -39,6 +40,10 @@ case "$APP_ROLE" in
       children+=("$!")
     fi
     python -u worker.py &
+    children+=("$!")
+    ;;
+  watchdog)
+    python -u external_watchdog.py &
     children+=("$!")
     ;;
   *) echo "Invalid APP_ROLE: $APP_ROLE" >&2; exit 64 ;;

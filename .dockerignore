@@ -12,7 +12,8 @@ audit
 macos_fork
 tests
 docs
-scripts
+scripts/*
+!scripts/external_watchdog.py
 .github
 *.md
 *.zip

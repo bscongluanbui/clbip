@@ -12,6 +12,18 @@ from credentials import CredentialError, DashboardCredentialStore, validate_pass
 from rpc import MAX_MESSAGE, authenticate, read_secret
 from service import OperationError, ProxyService
 from validation import ValidationError
+from heartbeat import HeartbeatMonitor
+from runtime_monitor import RuntimeMonitor
+
+
+def report(service, method, *args):
+    """Notification storage problems must not destroy an RPC response."""
+    if service is None:
+        return
+    try:
+        getattr(service, method)(*args)
+    except Exception as exc:
+        logging.error('Worker notification failed: %s', type(exc).__name__)
 
 
 def credential_dispatch(server, params):
@@ -37,32 +49,52 @@ def credential_dispatch(server, params):
 
 class WorkerHandler(socketserver.StreamRequestHandler):
     def handle(self):
-        self.request.settimeout(30)
-        raw = self.rfile.readline(MAX_MESSAGE + 1)
+        method, dispatched = None, False
         try:
+            self.request.settimeout(30)
+            raw = self.rfile.readline(MAX_MESSAGE + 1)
             if len(raw) > MAX_MESSAGE or not raw.endswith(b'\n'):
                 raise ValidationError('Invalid request framing')
             message = json.loads(raw)
             if not isinstance(message, dict) or not authenticate(message.get('token'), self.server.token):
                 response = {'ok': False, 'status': 401, 'error': 'Worker authentication failed'}
+                report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi RPC worker', 'Authentication failed')
             else:
                 method, params = message.get('method'), message.get('params', {})
+                dispatched = method != 'change_dashboard_password'
                 result = credential_dispatch(self.server, params) if method == 'change_dashboard_password' else self.server.service.dispatch(method, params)
                 response = {'ok': True, 'result': result}
+                if method == 'change_dashboard_password':
+                    report(self.server.service, '_report_resolved', 'operation:change_dashboard_password', 'Đổi mật khẩu dashboard đã hoạt động lại')
         except CredentialError as exc:
             response = {'ok': False, 'status': exc.status, 'error': str(exc)}
+            report(self.server.service, '_report_failure', 'operation:change_dashboard_password', 'Lỗi đổi mật khẩu dashboard', 'CredentialError')
         except (ValidationError, ValueError, KeyError, TypeError) as exc:
             # Validation messages describe fields but never include secret values.
             response = {'ok': False, 'status': 400, 'error': str(exc) if isinstance(exc, ValidationError) else 'Input/config validation failed'}
+            if not dispatched:
+                report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi RPC worker', 'Input/config validation failed')
         except OperationError as exc:
             response = {'ok': False, 'status': 503, 'error': str(exc)}
+            if not dispatched:
+                report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi RPC worker', 'Operation failed')
         except Exception as exc:
             logging.error('Worker method failed: %s', type(exc).__name__)
             response = {'ok': False, 'status': 500, 'error': 'Worker internal error'}
-        encoded = json.dumps(response).encode() + b'\n'
-        if len(encoded) > MAX_MESSAGE:
-            encoded = b'{"ok":false,"status":413,"error":"Worker response too large"}\n'
-        self.wfile.write(encoded)
+            if not dispatched:
+                key = 'operation:change_dashboard_password' if method == 'change_dashboard_password' else 'worker.rpc'
+                report(self.server.service, '_report_failure', key, 'Lỗi RPC worker', type(exc).__name__)
+        try:
+            encoded = json.dumps(response).encode() + b'\n'
+            response_too_large = len(encoded) > MAX_MESSAGE
+            if response_too_large:
+                report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi RPC worker', 'Response too large')
+                encoded = b'{"ok":false,"status":413,"error":"Worker response too large"}\n'
+            self.wfile.write(encoded)
+            if response.get('ok') is True and not response_too_large:
+                report(self.server.service, '_report_resolved', 'worker.rpc', 'RPC worker đã đáp ứng lại')
+        except Exception as exc:
+            report(self.server.service, '_report_failure', 'worker.rpc', 'Lỗi truyền RPC worker', type(exc).__name__)
 
 
 class WorkerServer(socketserver.ThreadingUnixStreamServer):
@@ -78,10 +110,12 @@ class WorkerServer(socketserver.ThreadingUnixStreamServer):
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
+            report(getattr(self, 'service', None), '_report_failure', 'worker.rpc_capacity', 'RPC worker đạt giới hạn', '32 simultaneous RPC handlers')
             self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
+            report(getattr(self, 'service', None), '_report_resolved', 'worker.rpc_capacity', 'RPC worker đã nhận kết nối lại')
         except BaseException:
             self.slots.release()
             raise
@@ -124,6 +158,26 @@ def main():
     path.chmod(0o660)
     thread = threading.Thread(target=service.run_reconciler, name='network-reconciler', daemon=True)
     thread.start()
+    background = []
+    if service.alerts is not None:
+        sender = threading.Thread(target=service.alerts.run,
+            args=(lambda: service.store.read()['settings'], service.stop_event),
+            name='telegram-outbox', daemon=True)
+        sender.start()
+        background.append(sender)
+    runtime = RuntimeMonitor(service)
+    dashboard_monitor = threading.Thread(target=runtime.run, args=(service.stop_event,),
+        name='dashboard-monitor', daemon=True)
+    dashboard_monitor.start()
+    background.append(dashboard_monitor)
+    heartbeat = HeartbeatMonitor()
+    def heartbeat_health():
+        snapshot = service.heartbeat_snapshot()
+        snapshot['healthy'] = snapshot['healthy'] and runtime.healthy and thread.is_alive() and all(t.is_alive() for t in background)
+        return snapshot
+    heartbeat_thread = threading.Thread(target=heartbeat.run,
+        args=(service.stop_event, heartbeat_health), name='external-heartbeat', daemon=True)
+    heartbeat_thread.start()
 
     def shutdown(signum, frame):
         service.stop_event.set()
@@ -136,6 +190,11 @@ def main():
     finally:
         service.stop_event.set()
         thread.join(timeout=30)
+        # DNS in an HTTP library can outlive its socket timeout. Daemons never
+        # hold the mutation lock; bounded joins preserve owned shutdown.
+        deadline = time.monotonic() + 2
+        for daemon in background + [heartbeat_thread]:
+            daemon.join(timeout=max(0, deadline - time.monotonic()))
         with service.lock:
             service.engine.stop_3proxy()
         server.server_close()

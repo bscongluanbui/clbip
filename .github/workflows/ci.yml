@@ -73,6 +73,18 @@ jobs:
             --entrypoint python ipv6-proxy-manager:local "/tests/$SCRIPT" --run
       - name: Isolated worker/dashboard roles and authenticated IPC
         run: .venv/bin/python tests/integration_roles.py --run
+      - name: Isolated watchdog heartbeat outage and recovery
+        run: |
+          docker run --platform "$PLATFORM" --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=32m \
+            --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
+            --entrypoint python ipv6-proxy-manager:local /tests/integration_watchdog.py --run
+      - name: Isolated multi-server bot and heartbeat isolation
+        run: |
+          docker run --platform "$PLATFORM" --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=32m \
+            --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
+            --entrypoint python ipv6-proxy-manager:local /tests/integration_watchdog_nodes.py --run
       - name: Real 3proxy DNS timeout and closed-client cleanup regression
         run: |
           docker run --platform "$PLATFORM" --rm --network none --user 0:10001 --cap-drop ALL --cap-add NET_ADMIN \

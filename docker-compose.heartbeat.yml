@@ -1,0 +1,9 @@
+# Opt-in override: create secrets/heartbeat_token, chmod 600, then run:
+# docker compose -f docker-compose.yml -f docker-compose.heartbeat.yml up -d
+services:
+  worker:
+    environment:
+      HEARTBEAT_TOKEN_FILE: /run/secrets/heartbeat_token
+    secrets: [heartbeat_token]
+secrets:
+  heartbeat_token: {file: ./secrets/heartbeat_token}

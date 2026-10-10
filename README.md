@@ -114,6 +114,24 @@ DNS cache tùy chọn: bật `DNS_CACHE_ENABLED=1`, kiểm tra `127.0.0.1:5353` 
 
 ## Telegram
 
+Cảnh báo vận hành tự động dùng bot token/chat ID đã lưu trong dashboard,
+không yêu cầu bật polling `TELEGRAM_ENABLED`. Worker lưu hàng đợi bền, gộp lỗi
+lặp và gửi tin phục hồi sau kiểm chứng; luồng gửi không giữ khóa tạo/khôi phục
+proxy. Health trả thêm `notifications` để xem queue/retry. Dashboard `/livez`
+được worker giám sát riêng mỗi 30 giây.
+
+Để báo khi nhà mất toàn bộ mạng/điện, dùng **watchdog trên VPS độc lập** nhận
+heartbeat rồi gửi Telegram khi thiếu heartbeat 180 giây. Xem
+[thiết lập Telegram/heartbeat/watchdog](docs/TELEGRAM_ALERTS.md), Compose riêng
+`docker-compose.watchdog.yml` và override `docker-compose.heartbeat.yml`.
+Các phép đo DNS/target lỗi không tự chứng minh toàn bộ WAN bị mất.
+
+Một VPS có thể giám sát **nhiều server, mỗi người một bot/token riêng**.
+Receiver, cổng Tailscale, dữ liệu và hàng đợi được tách theo node; bot lỗi của
+node này không chặn node khác. Agent host cho deployment đang ổn định chỉ đọc
+`/readyz`, không cần restart Docker hay thay pool. Xem
+[hướng dẫn chia sẻ watchdog và cài heartbeat host](docs/WATCHDOG_SHARING.md).
+
 Bot gọi management API với Bearer service token, không dựa vào bypass localhost. Quyền điều khiển yêu cầu đồng thời **chat ID + user ID allowlist**; anonymous/group/channel identity và forwarded commands bị bỏ qua. `/create`, `/clear`, `/restart`, `/reset200` cần `/confirm <nonce>` trong 60 giây, cùng user/chat; nonce dùng một lần. Config/token được đọc lại giữa các vòng polling. `/reset200` sử dụng một generation transaction `recreate=true`, không delete trước rồi create sau.
 
 Settings API chỉ trả `telegram_bot_token_configured`; users API không trả password. Export credentials là thao tác riêng; không gửi export vào log/báo cáo.

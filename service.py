@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import hashlib
 import ipaddress
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from resource_metrics import ResourceMetricsSampler
 from passive_diagnostics import PassiveDiagnosticsSampler
 from diagnostics import DiagnosticHistory, probe_dns
 from state_store import StateStore
+from alerts import AlertOutbox, redact_message
 from validation import (DEFAULT_SETTINGS, ValidationError, boolean, credential, generation_auth, integer, interface,
                         public_settings, settings_patch, target_url)
 
@@ -88,8 +90,106 @@ class ProxyService:
                              'dashboard_hosts': [], 'proxy_hosts': []}
         self.inventory_observed_at = 0
         self.source_candidates = {}
+        self.last_reconcile_monotonic = time.monotonic()
+        self.alerts_error = ''
+        try:
+            self.alerts = AlertOutbox(self.store.path)
+        except Exception as exc:
+            # Alert storage must not break Stop/network ownership. The external
+            # watchdog will also stop seeing healthy heartbeats in this case.
+            self.alerts = None
+            self.alerts_error = type(exc).__name__
+            logging.error('Alert storage initialization failed: %s', type(exc).__name__)
 
     def dispatch(self, method, params):
+        # No HTTP/Telegram request runs in this path. Queue only, then let the
+        # independent sender deliver outside the network mutation lock.
+        key = 'operation:' + (method if isinstance(method, str) and method.isidentifier() and len(method) <= 64 else 'invalid')
+        try:
+            result = self._dispatch(method, params)
+        except Exception as exc:
+            cancelled = getattr(self, 'cancel_operation', None)
+            stopping = getattr(self, 'stop_in_progress', None)
+            if not (cancelled is not None and cancelled.is_set()) and not (stopping is not None and stopping.is_set()):
+                self._report_failure(key, 'Lỗi thao tác ' + key, exc)
+            raise
+        if method == 'speedtest_batch' and isinstance(result, dict) and result.get('total_failed', 0):
+            self._report_failure(key, 'Kiểm tra proxy có lỗi',
+                f"{result.get('total_failed', 0)}/{result.get('total_tested', 0)} phép đo không thành công; chưa kết luận lỗi WAN")
+        elif method == 'diagnostics' and isinstance(result, dict):
+            samples = result.get('dns', {}).get('results', [])
+            failed = sum(row.get('success') is not True for row in samples)
+            if failed:
+                self._report_failure(key, 'Diagnostic DNS/target có lỗi',
+                    f'{failed}/{len(samples)} phép đo không thành công; chưa kết luận lỗi WAN')
+            elif samples:
+                self._report_resolved(key, 'Diagnostic DNS đã hoạt động lại')
+        elif isinstance(result, dict) and result.get('success') is False:
+            self._report_failure(key, 'Thao tác không thành công ' + key, 'Kết quả success=false')
+        else:
+            self._report_resolved(key, 'Thao tác đã hoạt động lại ' + key)
+        return result
+
+    def _report_failure(self, key, title, error):
+        try:
+            if getattr(self, 'alerts', None) is None:
+                return
+            try:
+                settings = self.store.read()['settings']
+            except Exception:
+                settings = {}
+            # Unexpected exceptions can echo unsaved request credentials. Their
+            # type/context suffices; never persist arbitrary exception text.
+            if isinstance(error, (OperationError, ValidationError)) and settings:
+                detail = type(error).__name__ + ': ' + str(error)
+            elif isinstance(error, Exception):
+                detail = type(error).__name__
+            else:
+                detail = str(error)
+            self.alerts.failure(key, title, redact_message(detail, settings))
+        except Exception as exc:
+            logging.error('Alert enqueue failed: %s', type(exc).__name__)
+
+    def _report_resolved(self, key, title, detail=''):
+        try:
+            if getattr(self, 'alerts', None) is not None:
+                self.alerts.resolve(key, title, detail)
+        except Exception as exc:
+            logging.error('Alert resolution enqueue failed: %s', type(exc).__name__)
+
+    def _report_event(self, key, title, detail=''):
+        try:
+            if getattr(self, 'alerts', None) is not None:
+                self.alerts.event(key, title, detail)
+        except Exception as exc:
+            logging.error('Alert event enqueue failed: %s', type(exc).__name__)
+
+    def notification_status(self):
+        try:
+            return self.alerts.status() if self.alerts is not None else {'available': False, 'error': self.alerts_error}
+        except Exception as exc:
+            return {'available': False, 'error': type(exc).__name__}
+
+    def heartbeat_snapshot(self):
+        """SQLite/cached liveness only; never wait for NIC probes or service lock."""
+        try:
+            state = self.store.read()
+            progress = self._progress_snapshot()
+            stamp = self.last_reconcile_monotonic
+            if progress['active'] and time.time() - progress['last_update'] < 60:
+                stamp = time.monotonic()
+            healthy = not self.health_error and not self.alerts_error
+            if state['desired_state'] == 'running':
+                healthy = healthy and not state['last_error'] and not self._recovery_active(state) and not self.source_candidates
+                if state['proxies']:
+                    processes, _ = self._cached_observation()
+                    healthy = healthy and processes.get('ready') is True
+                healthy = healthy and not state['pending_operation'] and not state['uncertain_addresses']
+            return {'healthy': bool(healthy), 'last_reconcile_monotonic': stamp}
+        except Exception:
+            return {'healthy': False, 'last_reconcile_monotonic': self.last_reconcile_monotonic}
+
+    def _dispatch(self, method, params):
         methods = {'settings': self.settings, 'save_settings': self.save_settings,
                    'users': self.users, 'add_user': self.add_user, 'delete_user': self.delete_user,
                    'proxies': self.proxies, 'generate': self.generate, 'delete': self.delete,
@@ -104,7 +204,7 @@ class ProxyService:
                    'resolve_uncertain': self.resolve_uncertain}
         if method not in methods or not isinstance(params, dict):
             raise ValidationError('Worker method/params không hợp lệ')
-        if method in {'status', 'health', 'proxies', 'diagnostics'}:
+        if method in {'status', 'health', 'proxies', 'diagnostics', 'telegram_test'}:
             return methods[method](params)
         if method in {'settings', 'users', 'events', 'interfaces', 'addresses', 'subnets'}:
             return methods[method](params)
@@ -475,11 +575,15 @@ class ProxyService:
         committed['managed_addresses'] = [r for r in committed['managed_addresses'] if address_key(r) not in removed_keys]
         if failed:
             committed['last_error'] = f'{len(failed)} owned IPv6 chờ cleanup retry'
+            self._report_failure('ipv6.cleanup', 'IPv6 cleanup chưa hoàn tất', committed['last_error'])
+        else:
+            self._report_resolved('ipv6.cleanup', 'IPv6 cleanup đã hoàn tất')
         self.store.write(committed)
         try:
             self.engine.prune_configs()
-        except Exception:
-            pass  # A retention failure must not undo a successful runtime commit.
+        except Exception as exc:
+            # Alert, but never undo an already verified runtime commit.
+            self._report_failure('engine.config_retention', 'Lỗi dọn cấu hình 3proxy cũ', exc)
         self.health_error = ''
         return {'success': True, 'cleanup_pending': len(failed), 'revision': committed['revision']}
 
@@ -776,6 +880,8 @@ class ProxyService:
             recovery.update(state='ready', phase='done', message='Đã tạo mới proxy từ IPv6 gốc đã xác minh',
                             completed_at=time.time())
         result = self._transaction(state, provisional, 'proxies.generate')
+        if recovery and recovery.get('phase') == 'done':
+            self._report_event('startup.rebuilt', 'Đã tạo lại pool sau khởi động', f'Proxy mới: {count}')
         return {**result, 'generated': count, 'total': len(state['proxies']), 'proxies': self.store.read()['proxies'][-count:]}
 
     def _replacement(self, state, selected, *, replacement_networks=None):
@@ -967,7 +1073,8 @@ class ProxyService:
                 'processes': processes, 'system': {'uptime_minutes': round((time.time()-self.started_at)/60, 1)},
                 'last_reconcile': state['last_reconcile'], 'metrics': metrics,
                 'uncertain_addresses': state['uncertain_addresses'], 'startup_recovery': recovery,
-                'progress': self._progress_snapshot(), 'observation': 'live'}
+                'progress': self._progress_snapshot(), 'observation': 'live',
+                'notifications': self.notification_status()}
 
     def _metrics(self, state):
         worker = {'rss_bytes': None, 'fd_count': None}
@@ -1137,6 +1244,11 @@ class ProxyService:
             if not data['success']:
                 data['error'] = 'Proxy transport/auth/DNS/target failed'
             self.diagnostic_history.record(data)
+            if data['success']:
+                self._report_resolved('diagnostic:' + str(proxy['port']), 'Proxy đã qua phép đo lại', 'Port ' + str(proxy['port']))
+            else:
+                self._report_failure('diagnostic:' + str(proxy['port']), 'Phép đo proxy có lỗi',
+                    'Port ' + str(proxy['port']) + '; transport/auth/DNS/target failed')
             return data
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError) as exc:
             from urllib.parse import urlsplit
@@ -1146,6 +1258,8 @@ class ProxyService:
                                   'transport' if isinstance(exc, OSError) else 'invalid_response',
                     'error': 'Proxy probe failed'}
             self.diagnostic_history.record(data)
+            self._report_failure('diagnostic:' + str(proxy['port']), 'Phép đo proxy có lỗi',
+                'Port ' + str(proxy['port']) + '; ' + data['error_type'])
             return data
 
     def diagnostics(self, params):
@@ -1235,15 +1349,15 @@ class ProxyService:
                 'allowed_user_ids': settings.get('telegram_allowed_user_ids', [])}
 
     def telegram_test(self, params):
-        config = self.telegram_config({})
-        if not config['token'] or not config['chat_id']:
+        if params:
+            raise ValidationError('Telegram test không nhận dữ liệu riêng tư từ request')
+        settings = self.store.read()['settings']
+        if not settings.get('telegram_bot_token') or not settings.get('telegram_chat_id'):
             raise ValidationError('Telegram chưa được cấu hình')
-        import requests
+        from telegram_notify import send_telegram_message
         try:
-            response = requests.post(f"https://api.telegram.org/bot{config['token']}/sendMessage",
-                                     json={'chat_id': config['chat_id'], 'text': 'IPv6 Proxy Manager: test notification'}, timeout=10)
-            response.raise_for_status()
-            if not response.json().get('ok'):
+            sent, _ = send_telegram_message('IPv6 Proxy Manager: test notification', settings=settings)
+            if not sent:
                 raise OperationError('Telegram API rejected message')
         except Exception as exc:
             raise OperationError('Telegram test failed; kiểm tra cấu hình/kết nối') from exc
@@ -1548,6 +1662,8 @@ class ProxyService:
                     if state['settings']['topology_mode'] == 'lan' and state['settings']['interface'] in replacements:
                         state['settings']['subnet'], state['settings']['prefix_len'] = replacements[state['settings']['interface']]
                     self._transaction(state, added, 'prefix.renumber')
+                    self._report_event('prefix.renumber', 'Đã chuyển pool sang prefix IPv6 mới',
+                                       f'Interface: {", ".join(sorted(replacements))}; proxy thay mới: {len(added)}')
                     state = self.store.read()
                     for iface in replacements:
                         self.source_candidates.pop(iface, None)
@@ -1564,8 +1680,17 @@ class ProxyService:
             if restored.get('failed'):
                 self.last_base_probe = 0
                 raise OperationError('IPv6 restore chưa thành công; không restart-loop')
-            if restored.get('restored') or not self.engine.running_instances().get('ready'):
+            processes_before = self.engine.running_instances()
+            if restored.get('restored') or not processes_before.get('ready'):
                 self._activate(state)
+                if restored.get('restored'):
+                    restored_rows = restored['restored']
+                    count = len(restored_rows) if isinstance(restored_rows, (list, tuple)) else int(restored_rows)
+                    self._report_event('ipv6.alias_restored', 'Đã khôi phục IPv6 bị thiếu', f'Địa chỉ khôi phục: {count}')
+                if not processes_before.get('ready'):
+                    self._report_event('engine.recovered', 'Đã khôi phục 3proxy và listener')
+            else:
+                self._cache_observation(processes=processes_before)
             if state['settings']['rotation_enabled'] and time.time() >= state['rotation_due']:
                 self.rotate({})
                 state = self.store.read()
@@ -1584,6 +1709,7 @@ class ProxyService:
             state['last_reconcile'], state['last_error'] = time.time(), ''
             self.store.write(state)
             self.health_error = ''
+            self._report_resolved('storage.reconcile', 'Lưu trạng thái reconciler đã phục hồi')
 
     def run_reconciler(self):
         failures = 0
@@ -1591,21 +1717,41 @@ class ProxyService:
             try:
                 self.reconcile()
                 failures = 0
+                state = self.store.read()
+                processes, _ = self._cached_observation()
+                if (state['desired_state'] == 'running' and state['proxies'] and
+                        not state['last_error'] and not self.health_error and
+                        not self._recovery_active(state) and not self.source_candidates and
+                        not state['pending_operation'] and not state['uncertain_addresses'] and
+                        processes.get('ready') is True):
+                    self._report_resolved('network.reconcile', 'IPv6/proxy đã phục hồi và được xác minh')
             except Exception as exc:
                 failures += 1
-                with self.lock:
-                    self.health_error = str(exc)
-                    state = self.store.read()
-                    state['last_error'] = type(exc).__name__ + ': ' + str(exc)
-                    recovery = state.get('startup_recovery')
-                    if recovery and recovery.get('phase') not in {None, 'done'} and not state['manual_stop']:
-                        recovery.update(state='waiting' if recovery['phase'] == 'waiting_network' else 'error',
-                                        message=state['last_error'])
-                    self.store.event(state, 'reconcile', 'failed', type(exc).__name__)
-                    self.store.write(state)
-            state = self.store.read()
-            recovering = (state['settings']['startup_rebuild_enabled'] and not state['manual_stop'] and
-                          (state.get('startup_recovery') or {}).get('phase') not in {None, 'done'})
-            self.stop_event.wait(min(30, 5 * 2**min(failures, 3)) if recovering else
-                                 min(300, 10 * 2**min(failures, 5)) if failures else
-                                 state['settings']['source_poll_interval'])
+                self.health_error = type(exc).__name__ + ': ' + str(exc)
+                self._report_failure('network.reconcile', 'Lỗi giám sát/phục hồi IPv6', exc)
+                try:
+                    with self.lock:
+                        state = self.store.read()
+                        state['last_error'] = type(exc).__name__ + ': ' + str(exc)
+                        recovery = state.get('startup_recovery')
+                        if recovery and recovery.get('phase') not in {None, 'done'} and not state['manual_stop']:
+                            recovery.update(state='waiting' if recovery['phase'] == 'waiting_network' else 'error',
+                                            message=state['last_error'])
+                        self.store.event(state, 'reconcile', 'failed', type(exc).__name__)
+                        self.store.write(state)
+                except Exception as persistence_error:
+                    self._report_failure('storage.reconcile', 'Lỗi lưu trạng thái worker', persistence_error)
+            finally:
+                self.last_reconcile_monotonic = time.monotonic()
+            try:
+                state = self.store.read()
+                recovering = (state['settings']['startup_rebuild_enabled'] and not state['manual_stop'] and
+                              (state.get('startup_recovery') or {}).get('phase') not in {None, 'done'})
+                delay = (min(30, 5 * 2**min(failures, 3)) if recovering else
+                         min(300, 10 * 2**min(failures, 5)) if failures else
+                         state['settings']['source_poll_interval'])
+            except Exception as exc:
+                self.health_error = type(exc).__name__
+                self._report_failure('storage.reconcile', 'Lỗi đọc trạng thái worker', exc)
+                delay = min(300, 10 * 2**min(failures, 5))
+            self.stop_event.wait(delay)

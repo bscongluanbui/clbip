@@ -34,7 +34,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends iproute2 curl ca-certificates dnsmasq-base \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 manager && useradd --uid 10001 --gid 10001 --no-create-home manager \
-    && mkdir -p /app/data /run/ipv6-manager \
+    && mkdir -p /app/data /app/watchdog-data /run/ipv6-manager \
+    && chown 10001:10001 /app/watchdog-data \
     && chown 0:10001 /run/ipv6-manager && chmod 0770 /run/ipv6-manager
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
@@ -43,9 +44,11 @@ COPY --from=python-builder /install/bin/gunicorn /usr/local/bin/gunicorn
 RUN python -m pip check \
     && python -c 'import aiohttp, flask, gunicorn, requests, telebot; print("RUNTIME_DEPENDENCIES=OK")'
 COPY --from=builder /build/bin/3proxy /usr/local/bin/3proxy
-COPY app.py ipv6_manager.py proxy_config.py state_store.py service.py rpc.py validation.py worker.py credentials.py network_inventory.py /app/
-COPY resource_metrics.py host_control.py diagnostics.py passive_diagnostics.py /app/
-COPY telegram_notify.py telegram_bot.py start.sh /app/
+# Package every top-level application module so new local imports cannot be
+# omitted by a stale hand-maintained COPY list. Host tools stay in scripts/.
+COPY *.py /app/
+COPY scripts/external_watchdog.py /app/external_watchdog.py
+COPY start.sh /app/
 COPY templates/ /app/templates/
 COPY static/ /app/static/
 RUN chmod 0755 /app/start.sh /usr/local/bin/3proxy
