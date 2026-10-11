@@ -73,6 +73,12 @@ jobs:
             --entrypoint python ipv6-proxy-manager:local "/tests/$SCRIPT" --run
       - name: Isolated worker/dashboard roles and authenticated IPC
         run: .venv/bin/python tests/integration_roles.py --run
+      - name: Actual dashboard wildcard default and explicit bind overrides
+        run: |
+          docker run --platform "$PLATFORM" --rm --network none --cap-drop ALL \
+            --security-opt no-new-privileges:true --read-only --tmpfs /tmp:rw,nosuid,size=64m \
+            --mount type=bind,src="$(pwd)/tests",dst=/tests,readonly \
+            --entrypoint python ipv6-proxy-manager:local /tests/integration_dashboard_bind.py --run
       - name: Isolated watchdog heartbeat outage and recovery
         run: |
           docker run --platform "$PLATFORM" --rm --network none --cap-drop ALL \

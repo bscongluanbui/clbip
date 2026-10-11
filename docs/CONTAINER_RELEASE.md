@@ -53,11 +53,15 @@ python3 scripts/doctor.py
 
 `--no-dashboard-password` tạo bootstrap password rỗng; dashboard không cần đăng nhập. Bỏ flag này nếu muốn mật khẩu khởi tạo ngẫu nhiên. Sau đó có thể đổi sang bất kỳ mật khẩu UTF-8 hoặc tắt đăng nhập trong UI, không ép độ dài/ký tự đặc biệt. Script chỉ tạo file chưa tồn tại, không thay secrets cũ.
 
-Mặc định dashboard nghe `127.0.0.1:7070`. Để truy cập qua SSH tunnel:
+Mặc định dashboard nghe `0.0.0.0:7070` trên tất cả địa chỉ IPv4 của máy chủ. Mở trực tiếp `http://SERVER_IP:7070` với IP của máy chủ; không nhập `0.0.0.0` vào trình duyệt. Port mặc định vẫn là `7070`.
+
+Tùy chọn chỉ nghe loopback: đặt `GUI_BIND=127.0.0.1` trong `.env`, chạy lại `docker compose up -d --no-build`, rồi dùng SSH tunnel:
 
 ```bash
 ssh -L 7070:127.0.0.1:7070 ubuntu@LINUX_HOST
 ```
+
+Khi dùng tunnel, mở `http://127.0.0.1:7070`.
 
 ## Cập nhật image
 
@@ -71,6 +75,17 @@ docker compose logs --tail=100 worker dashboard
 ```
 
 `pull` tải image, `up` mới thay container. Pull đơn lẻ chưa chạy bản mới. Nếu release thay Compose/scripts, cập nhật repository trước (`git pull --ff-only`), kiểm tra `docker compose config --quiet`, rồi chạy hai lệnh trên. Mặc định chỉ cần pull image khi cấu hình triển khai chưa đổi.
+
+### Đổi mặc định dashboard sang `0.0.0.0`
+
+Image và Compose mới dùng `GUI_BIND=0.0.0.0`, giữ port `7070`. Với deployment cũ, chọn một trong hai cách trước khi chạy `up`:
+
+- Cập nhật checkout bằng `git pull --ff-only` để nhận `docker-compose.yml` mới.
+- Nếu giữ Compose cũ, thêm hoặc sửa đúng một dòng `GUI_BIND=0.0.0.0` trong `.env`.
+
+Compose cũ có `${GUI_BIND:-127.0.0.1}` nên vẫn ghi đè mặc định của image mới nếu không cập nhật cấu hình. `docker compose pull` không thay file Compose hoặc `.env`. Các giá trị `GUI_BIND` đã đặt qua `.env`, shell hay Compose override được giữ nguyên; kiểm tra cấu hình cuối bằng `docker compose config` rồi recreate dashboard bằng `docker compose up -d --no-build`. Nếu đã chủ động đặt `GUI_BIND=127.0.0.1`, dashboard tiếp tục chỉ nghe loopback cho đến khi giá trị đó được sửa.
+
+Thay bind dashboard không đổi listener proxy, cổng watchdog hoặc URL loopback của heartbeat/healthcheck. Nó cũng không tự cập nhật native heartbeat agent ngoài container.
 
 Compose giữ `name: ipv6-proxy-manager` và các named volumes:
 

@@ -4,7 +4,7 @@ Dashboard quản lý HTTP/SOCKS5 proxy với 3proxy. Địa chỉ được chọ
 
 ## Kiến trúc
 
-- **dashboard**: Gunicorn 1 worker / 8 threads, user `10001:10001`, không capability, root filesystem read-only; mặc định chỉ nghe `127.0.0.1:7070`.
+- **dashboard**: Gunicorn 1 worker / 8 threads, user `10001:10001`, không capability, root filesystem read-only; mặc định nghe `0.0.0.0:7070` trên tất cả địa chỉ IPv4 của máy chủ.
 - **worker**: duy nhất quản lý state, IPv6 và 3proxy; `NET_ADMIN`, không `privileged`; persistent named volume `proxy-data`.
 - Dashboard ↔ worker: Unix socket mode `0660`, group `10001`, xác thực `SERVICE_TOKEN`; dashboard mount socket directory và volume mật khẩu dashboard read-only, không mount database. Worker ghi mật khẩu vào volume `dashboard-credentials` riêng.
 - Một reconciler theo **desired state**; lệnh Stop được giữ qua reconcile/restart. Entrypoint chỉ giám sát vòng đời process, không đổi sysctl, không có watchdog thứ hai, không `pkill` process host.
@@ -38,13 +38,17 @@ python3 scripts/doctor.py
 
 Giữ project name `ipv6-proxy-manager`, ba named volumes và thư mục `secrets`; cập nhật container không xóa settings, proxy pool đã lưu hoặc mật khẩu dashboard. Xem [container release, build local và rollback](docs/CONTAINER_RELEASE.md) để pin tag/digest hoặc cập nhật file Compose khi có thay đổi cấu hình triển khai.
 
-Truy cập qua SSH tunnel:
+**Chuyển từ mặc định bind cũ:** cập nhật cả `docker-compose.yml` từ repo hoặc đặt `GUI_BIND=0.0.0.0` trong `.env`, rồi chạy `docker compose up -d --no-build`. Compose cũ vẫn có mặc định `127.0.0.1` và sẽ ghi đè mặc định của image mới. `docker compose pull` không cập nhật file Compose hoặc tự thay giá trị `GUI_BIND` đã đặt trong `.env`, môi trường hay override.
+
+Mở trực tiếp `http://SERVER_IP:7070` (thay `SERVER_IP` bằng IP của máy chủ). `0.0.0.0` là địa chỉ nghe, không phải địa chỉ nhập vào trình duyệt.
+
+Nếu muốn chỉ nghe loopback, đặt `GUI_BIND=127.0.0.1` trong `.env`, chạy lại `docker compose up -d --no-build`, rồi dùng SSH tunnel:
 
 ```bash
 ssh -L 7070:127.0.0.1:7070 ACCOUNT@LINUX_HOST
 ```
 
-Mở `http://127.0.0.1:7070`. Dashboard mở trực tiếp nếu không đặt mật khẩu; nếu đã đặt, đăng nhập bằng mật khẩu đó. Mật khẩu tùy chọn, không ép độ dài hay ký tự đặc biệt; có thể đổi hoặc để trống để tắt đăng nhập trong dashboard. Volume credential đã khởi tạo sẽ giữ mật khẩu qua các lần update; thay bootstrap secret không ghi đè volume này. File secrets không được đưa vào Git/image/build context; trên Linux thư mục host `secrets` có mode `0700`. File-backed Compose secrets giữ quyền file host; script tạo file `0444` để user dashboard non-root đọc được trong container. Giữ nguyên `secret_key` và `service_token` qua các lần cập nhật.
+Với tunnel, mở `http://127.0.0.1:7070`. Dashboard mở trực tiếp nếu không đặt mật khẩu; nếu đã đặt, đăng nhập bằng mật khẩu đó. Mật khẩu tùy chọn, không ép độ dài hay ký tự đặc biệt; có thể đổi hoặc để trống để tắt đăng nhập trong dashboard. Volume credential đã khởi tạo sẽ giữ mật khẩu qua các lần update; thay bootstrap secret không ghi đè volume này. File secrets không được đưa vào Git/image/build context; trên Linux thư mục host `secrets` có mode `0700`. File-backed Compose secrets giữ quyền file host; script tạo file `0444` để user dashboard non-root đọc được trong container. Giữ nguyên `secret_key` và `service_token` qua các lần cập nhật.
 
 ### Build local / phát triển
 
@@ -99,7 +103,7 @@ Bản nâng cấp Linux/Docker: [cải tiến batch, dashboard và vận hành](
 | Biến | Mặc định / nghĩa |
 |---|---|
 | `IPV6_MANAGER_IMAGE` | `ghcr.io/bscongluanbui/clbip:latest`; có thể pin tag hoặc digest trong `.env` |
-| `GUI_BIND` | `127.0.0.1`; mở LAN chỉ khi đã có ACL/firewall/TLS phù hợp |
+| `GUI_BIND` | `0.0.0.0`; nghe tất cả IPv4, có thể đặt `127.0.0.1` để chỉ nghe loopback |
 | `GUI_PORT` | `7070`; healthcheck và bot dùng cùng port |
 | `ADMIN_PASSWORD_FILE` | `/run/secrets/admin_password` |
 | `SECRET_KEY_FILE` | `/run/secrets/secret_key`, persistent |
@@ -128,8 +132,9 @@ Các phép đo DNS/target lỗi không tự chứng minh toàn bộ WAN bị m�
 
 Một VPS có thể giám sát **nhiều server, mỗi người một bot/token riêng**.
 Receiver, cổng Tailscale, dữ liệu và hàng đợi được tách theo node; bot lỗi của
-node này không chặn node khác. Agent host cho deployment đang ổn định chỉ đọc
-`/readyz`, không cần restart Docker hay thay pool. Xem
+node này không chặn node khác. Agent host mới chỉ đọc `/heartbeatz` để kiểm tra dashboard/worker còn sống,
+không lấy readiness của pool làm điều kiện gửi heartbeat. Agent cũ và file env
+đã đặt `/readyz` cần cập nhật riêng theo hướng dẫn chuyển đổi. Xem
 [hướng dẫn chia sẻ watchdog và cài heartbeat host](docs/WATCHDOG_SHARING.md).
 
 Bot gọi management API với Bearer service token, không dựa vào bypass localhost. Quyền điều khiển yêu cầu đồng thời **chat ID + user ID allowlist**; anonymous/group/channel identity và forwarded commands bị bỏ qua. `/create`, `/clear`, `/restart`, `/reset200` cần `/confirm <nonce>` trong 60 giây, cùng user/chat; nonce dùng một lần. Config/token được đọc lại giữa các vòng polling. `/reset200` sử dụng một generation transaction `recreate=true`, không delete trước rồi create sau.

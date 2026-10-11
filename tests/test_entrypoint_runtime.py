@@ -39,8 +39,8 @@ class EntrypointRuntimeTests(unittest.TestCase):
                 self.assertEqual(self.arguments[self.arguments.index(option) + 1], value)
         self.assertEqual(self.arguments[-1], 'app:app')
 
-    def test_bind_remains_configurable_with_loopback_default(self):
-        self.assertIn('GUI_BIND=${GUI_BIND:-127.0.0.1}', self.source)
+    def test_bind_remains_configurable_with_all_interfaces_default(self):
+        self.assertIn('GUI_BIND=${GUI_BIND:-0.0.0.0}', self.source)
         self.assertEqual(self.arguments[self.arguments.index('--bind') + 1],
                          '${GUI_BIND}:${GUI_PORT}')
 

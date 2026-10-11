@@ -4,7 +4,7 @@ set -euo pipefail
 cd /app
 APP_ROLE=${APP_ROLE:-dashboard}
 GUI_PORT=${GUI_PORT:-7070}
-GUI_BIND=${GUI_BIND:-127.0.0.1}
+GUI_BIND=${GUI_BIND:-0.0.0.0}
 children=()
 finish() {
     trap - TERM INT EXIT

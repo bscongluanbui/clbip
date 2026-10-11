@@ -28,7 +28,7 @@ LABEL org.opencontainers.image.source="https://github.com/bscongluanbui/clbip" \
       org.opencontainers.image.description="Linux IPv6 proxy manager with isolated worker and dashboard roles" \
       org.opencontainers.image.revision="${VCS_REF}"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    DATA_DIR=/app/data GUI_PORT=7070 GUI_BIND=127.0.0.1 \
+    DATA_DIR=/app/data GUI_PORT=7070 GUI_BIND=0.0.0.0 \
     WORKER_SOCKET=/run/ipv6-manager/worker.sock APP_ROLE=dashboard \
     PROXY_BINARY=/usr/local/bin/3proxy DNS_CACHE_ENABLED=0
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends iproute2 curl ca-certificates dnsmasq-base \

@@ -20,7 +20,7 @@ def create_app(config=None, client=None):
                       DASHBOARD_PASSWORD_PATH=os.environ.get('DASHBOARD_PASSWORD_PATH', ''),
                       DASHBOARD_PASSWORD_REQUIRE_ROOT=True,
                       GUI_PORT=os.environ.get('GUI_PORT', '7070'),
-                      GUI_BIND=os.environ.get('GUI_BIND', '127.0.0.1'),
+                      GUI_BIND=os.environ.get('GUI_BIND') or '0.0.0.0',
                       SERVICE_TOKEN=read_secret('SERVICE_TOKEN', required=False),
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
                       SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'true').lower() in ('1', 'true', 'yes'),
@@ -310,7 +310,7 @@ def create_app(config=None, client=None):
                 except (TypeError, ValueError):
                     port = 7070
                 try:
-                    bind = ipaddress.IPv4Address(app.config.get('GUI_BIND', '127.0.0.1'))
+                    bind = ipaddress.IPv4Address(app.config.get('GUI_BIND') or '0.0.0.0')
                     if bind.is_multicast or bind.is_reserved:
                         raise ValueError('bind address')
                 except (ValueError, TypeError):

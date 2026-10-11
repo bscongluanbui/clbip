@@ -25,7 +25,7 @@ services:
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
       DASHBOARD_PASSWORD_PATH: /var/lib/ipv6-manager-credentials/admin_password
       DNS_CACHE_ENABLED: "${DNS_CACHE_ENABLED:-0}"
-      GUI_BIND: "${GUI_BIND:-127.0.0.1}"
+      GUI_BIND: "${GUI_BIND:-0.0.0.0}"
       GUI_PORT: "${GUI_PORT:-7070}"
       DASHBOARD_MONITOR_ENABLED: "${DASHBOARD_MONITOR_ENABLED:-1}"
       TELEGRAM_SERVER_NAME: "${TELEGRAM_SERVER_NAME:-ipv6-manager}"
@@ -54,7 +54,7 @@ services:
       # optional control server disabled on the read-only runtime filesystem,
       # including when deploying an already-published image.
       GUNICORN_CMD_ARGS: "--no-control-socket"
-      GUI_BIND: "${GUI_BIND:-127.0.0.1}"
+      GUI_BIND: "${GUI_BIND:-0.0.0.0}"
       GUI_PORT: "${GUI_PORT:-7070}"
       WORKER_SOCKET: /run/ipv6-manager/worker.sock
       SERVICE_TOKEN_FILE: /run/secrets/service_token

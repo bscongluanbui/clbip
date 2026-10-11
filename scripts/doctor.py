@@ -172,7 +172,7 @@ def environment(service):
 def dashboard_address(config):
     try:
         env = environment(config['services']['dashboard'])
-        host = str(ipaddress.ip_address(env.get('GUI_BIND') or '127.0.0.1'))
+        host = str(ipaddress.ip_address(env.get('GUI_BIND') or '0.0.0.0'))
         port = int(env.get('GUI_PORT') or '7070')
     except (KeyError, TypeError, ValueError):
         raise ValueError('Compose dashboard requires a valid IP GUI_BIND and integer GUI_PORT') from None
