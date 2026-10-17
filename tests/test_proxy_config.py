@@ -111,7 +111,7 @@ class ConfigTests(unittest.TestCase):
         password = 'A/b;c<d>(e)[f]{g}!@%=+?~-' * 8
         config = pc._generate_single_config([PROXY], [{**USER, 'password': password}], {**SETTINGS, 'dns1': '127.0.0.1:5353', 'dns2': '2001:4860:4860::8888'})
         self.assertIn('nserver 127.0.0.1:5353', config)
-        self.assertIn('nserver 2001:4860:4860::8888', config)
+        self.assertIn('nserver [2001:4860:4860::8888]', config)
         self.assertIn(':CL:' + password, config)
         for bad in ('127.0.0.1:0', '127.0.0.1:65536', '127.0.0.1:53/tcp', '127.0.0.1:bad', 'fe80::1%eth0'):
             with self.subTest(dns=bad), self.assertRaises(ValueError):

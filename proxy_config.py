@@ -171,11 +171,20 @@ def _calc_instance_count(total_proxies):
     return math.ceil(total_proxies / _integer(PROXIES_PER_INSTANCE, 'PROXIES_PER_INSTANCE', 1, 256)) if total_proxies else 0
 
 
+def _nserver_endpoint(value):
+    """Render validated numeric DNS endpoints in 3proxy's address syntax."""
+    # IPv4[:port] is already canonical; a raw IPv6 address needs brackets so
+    # 3proxy does not interpret its final hextet as the resolver port.
+    if value.count(':') > 1:
+        return f'[{ipaddress.IPv6Address(value)}]'
+    return value
+
+
 def _generate_single_config(proxies, users, settings, instance_index=0, total_instances=1):
     proxies, users, settings = validate_config_inputs(proxies, users, settings)
     root = _path_token(DATA_DIR)
     lines = ['# Managed 3proxy config; foreground process', f'# Instance {instance_index + 1}/{total_instances}']
-    lines += [f'nserver {settings[key]}' for key in ('dns1', 'dns2', 'dns3')]
+    lines += [f'nserver {_nserver_endpoint(settings[key])}' for key in ('dns1', 'dns2', 'dns3')]
     lines += ['nscache 65536', 'nscache6 65536']
     # BYTE_SHORT BYTE_LONG STRING_SHORT STRING_LONG CONNECTION_SHORT
     # CONNECTION_LONG DNS CHAIN CONNECT CONNECTBACK (3proxy manual).
